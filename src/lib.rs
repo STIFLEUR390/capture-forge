@@ -1,5 +1,3 @@
-use oxichrome::prelude::*;
-
 #[oxichrome::extension(
     name = "Capture Forge",
     version = "0.1.0",
