@@ -1,4 +1,5 @@
 mod error;
+mod lifecycle;
 mod messaging;
 mod recorder;
 mod stream;

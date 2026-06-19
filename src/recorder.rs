@@ -58,6 +58,9 @@ pub struct RecordingSession {
     mic_enabled: bool,
     /// Unique session identifier, generated when recording begins.
     session_id: Option<String>,
+    /// Total accumulated recording duration in milliseconds (excluding
+    /// pauses).  Set by the lifecycle module when recording stops.
+    pub(crate) accumulated_duration_ms: f64,
 }
 
 impl RecordingSession {
@@ -68,6 +71,7 @@ impl RecordingSession {
             mode: None,
             mic_enabled: true,
             session_id: None,
+            accumulated_duration_ms: 0.0,
         }
     }
 
@@ -147,6 +151,18 @@ impl RecordingSession {
         self.session_id = Some(format!("rec_{:x}_{:04x}", ts, seq));
     }
 
+    /// Set the accumulated recording duration (milliseconds).
+    ///
+    /// Called by the lifecycle module when recording stops.
+    pub fn set_duration(&mut self, ms: f64) {
+        self.accumulated_duration_ms = ms;
+    }
+
+    /// Return the accumulated recording duration (milliseconds).
+    pub fn accumulated_duration_ms(&self) -> f64 {
+        self.accumulated_duration_ms
+    }
+
     /// Attempt a state transition.
     ///
     /// Returns `Ok(())` if the transition is valid, or
@@ -163,6 +179,7 @@ impl RecordingSession {
             // Starting
             (SessionState::Starting, SessionState::Countdown) => true,
             (SessionState::Starting, SessionState::Error) => true,
+            (SessionState::Starting, SessionState::Idle) => true,
 
             // Countdown
             (SessionState::Countdown, SessionState::Recording) => true,
@@ -179,6 +196,7 @@ impl RecordingSession {
             (SessionState::Paused, SessionState::Recording) => true,
             (SessionState::Paused, SessionState::Stopping) => true,
             (SessionState::Paused, SessionState::Error) => true,
+            (SessionState::Paused, SessionState::Idle) => true,
 
             // Stopping
             (SessionState::Stopping, SessionState::Preview) => true,
@@ -611,5 +629,66 @@ mod tests {
     fn test_mic_enabled_default() {
         let s = RecordingSession::new();
         assert!(s.mic_enabled());
+    }
+
+    // ------------------------------------------------------------------
+    // New transition tests (Story 1.3 — cancel/stop from more states)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_cancel_from_starting() {
+        let mut s = RecordingSession::new();
+        s.transition(SessionState::Starting).unwrap();
+        s.transition(SessionState::Idle).unwrap();
+        assert_eq!(s.state(), &SessionState::Idle);
+    }
+
+    #[test]
+    fn test_cancel_from_recording() {
+        let mut s = RecordingSession::new();
+        s.transition(SessionState::Starting).unwrap();
+        s.transition(SessionState::Countdown).unwrap();
+        s.transition(SessionState::Recording).unwrap();
+        s.transition(SessionState::Idle).unwrap();
+        assert_eq!(s.state(), &SessionState::Idle);
+    }
+
+    #[test]
+    fn test_cancel_from_paused() {
+        let mut s = RecordingSession::new();
+        s.transition(SessionState::Starting).unwrap();
+        s.transition(SessionState::Countdown).unwrap();
+        s.transition(SessionState::Recording).unwrap();
+        s.transition(SessionState::Paused).unwrap();
+        s.transition(SessionState::Idle).unwrap();
+        assert_eq!(s.state(), &SessionState::Idle);
+    }
+
+    #[test]
+    fn test_stop_from_paused() {
+        let mut s = RecordingSession::new();
+        s.transition(SessionState::Starting).unwrap();
+        s.transition(SessionState::Countdown).unwrap();
+        s.transition(SessionState::Recording).unwrap();
+        s.transition(SessionState::Paused).unwrap();
+        s.transition(SessionState::Stopping).unwrap();
+        assert_eq!(s.state(), &SessionState::Stopping);
+    }
+
+    // ------------------------------------------------------------------
+    // RecordingSession — accumulated_duration_ms field (Story 1.3)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_session_duration_field_default() {
+        let s = RecordingSession::new();
+        assert_eq!(s.accumulated_duration_ms(), 0.0);
+    }
+
+    #[test]
+    fn test_session_set_duration() {
+        let mut s = RecordingSession::new();
+        s.set_duration(1234.5);
+        assert!((s.accumulated_duration_ms() - 1234.5).abs() < 0.001);
     }
 }
