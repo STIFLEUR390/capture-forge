@@ -1,7 +1,7 @@
 # Product Requirements Document — CaptureForge
 
 **Version**: 1.0
-**Status**: draft
+**Status**: final
 **Created**: 2026-06-19
 **Updated**: 2026-06-19
 
@@ -13,6 +13,7 @@
 2. [Target Audience](#2-target-audience)
 3. [Success Metrics & Counter-Metrics](#3-success-metrics--counter-metrics)
 4. [Product Principles](#4-product-principles)
+    - [Glossary](#41-glossary)
 5. [Product Architecture](#5-product-architecture)
 6. [Sub-Product A: Recorder Core (P0, V0.1)](#6-sub-product-a-recorder-core-p0-v01)
 7. [Sub-Product B: Editor & Overlay (P1, V0.5)](#7-sub-product-b-editor--overlay-p1-v05)
@@ -130,9 +131,19 @@ A bug or delay in one sub-product never blocks the others.
 
 5. **Architecture must remain forkable and understandable.** Modules are decoupled by sub-product boundary. Dependencies are minimized. The workspace structure maps one-to-one to the feature hierarchy — a new contributor should find the relevant file without reading a design doc.
 
----
+### 4.1 Glossary
 
-## 5. Product Architecture
+| Term | Definition |
+|------|------------|
+| **Chunk lifecycle** | The four-state protocol for each OPFS file: `.partial` (Started) → `.written` (Written) → `.bin` (Committed) → Verified (manifest-only). See §6.6. |
+| **Session manifest** | JSON file (`manifest.json`) stored alongside chunks in OPFS, recording per-chunk metadata (index, track, size, checksum, status, timestamp). |
+| **Triple verification** | Three checks run during recovery: manifest vs filesystem (every committed chunk has a file), file size vs manifest entry, and chunk index contiguity (longest prefix from index 0). |
+| **Integrity report** | A machine-readable document (`integrity-report.json`) generated after recovery, summarizing what was recovered, what was lost, and what the user should do next. |
+| **Recording mode** | Enum selecting the capture source: `FullScreen` (via `getDisplayMedia`), `Tab` (via `tabCapture`), or future `Camera` / `Region` (P1). |
+| **AudienceLens** | (P2+) A declarative transformation engine that derives audience-specific publications from a single immutable session source. See §9. |
+| **Sub-product** | One of three independently shippable capability groups: Recorder Core, Editor + Overlay, AI / Enrichment. Each is independently developable and feature-gated. |
+
+---
 
 ### 5.1 Stack
 
@@ -165,7 +176,7 @@ Rust-first with minimal JS shims where the ecosystem dictates:
 
 ### 5.3 Oxichrome Exit Strategy
 
-Oxichrome v0.2 is a young framework. The architecture includes three layers of defence against framework risk:
+Oxichrome v0.2 is a young framework. `[ASSUMPTION-01: Oxichrome v0.2 stable enough for production use]` The architecture includes three layers of defence against framework risk:
 
 **Internal wrappers on browser APIs.** All Chrome API calls (storage, tabs, commands, downloads) go through thin Rust traits under `src/background/`. These traits are framework-agnostic — they use `wasm-bindgen` and `web-sys` directly, not Oxichrome runtime wrappers. If Oxichrome becomes unmaintainable, only the proc-macro attributes in `src/lib.rs` and the build pipeline need replacement.
 
@@ -256,16 +267,16 @@ The minimum viable recording experience: screen and tab capture with microphone,
 - Stop / Cancel
 - 3-2-1 countdown
 - WebM export (chunk concatenation, no re-encode)
-- OPFS storage with chunk lifecycle (`Started → Written → Committed → Verified`)
+- OPFS storage `[ASSUMPTION-05: OPFS reliably available in Chrome 120+]` with chunk lifecycle (`Started → Written → Committed → Verified`)
 - Basic crash recovery (detect orphan chunks, propose restore)
 - Minimal preview (play, download, delete)
 - Simple popup UI for mode selection
 
 **Explicitly deferred to V0.2 / V0.3:**
-- Storage manager with quota display (post-V0.1)
-- Configurable keyboard shortcuts (`chrome.commands` defaults only)
-- Setup wizard (permission onboarding via native Chrome dialogs)
-- IndexedDB fallback (V0.2 — OPFS is reliably available on Chrome 120+; fallback adds test surface without user-facing value at launch)
+- `[NON-GOAL for MVP]` Storage manager with quota display (post-V0.1)
+- `[NON-GOAL for MVP]` Configurable keyboard shortcuts (`chrome.commands` defaults only)
+- `[NON-GOAL for MVP]` Setup wizard (permission onboarding via native Chrome dialogs)
+- `[NON-GOAL for MVP]` IndexedDB fallback (V0.2 — OPFS is reliably available on Chrome 120+; fallback adds test surface without user-facing value at launch)
 
 ### 6.2 User Stories
 
@@ -302,7 +313,7 @@ The minimum viable recording experience: screen and tab capture with microphone,
 | REC-A5 | No duration limit | 1h without crash | Chrome 120+ | RAM monitoring with alert at 80% of safe threshold. |
 | REC-A6 | Start guard | Stale lock >30s auto-cleaned | Chrome 120+ | Lock stored in `chrome.storage.local`. |
 | REC-A7 | WebM export (5min video) | <3s | Chrome 120+ | Simple chunk concatenation, no re-encode. |
-| REC-A8 | Crash recovery | Manual restore proposed | Chrome 120+ | If OPFS chunks found at startup, offer "Restore". |
+| REC-A8 | Crash recovery | Toast with "Restore" action shown | Chrome 120+ | If OPFS chunks found at startup, show a non-modal toast "A previous recording was found" with a "Restore" button. On restore, open preview page with recovered content. |
 | REC-A9 | Chunk integrity | Written → Committed → Verified | Chrome 120+ | Triple verification (manifest vs filesystem, size check, index contiguity). |
 | REC-A10 | Start → first frame | <2s from click to recording | Chrome 120+ | Measured from popup click to MediaRecorder `ondataavailable` first fire. |
 
@@ -659,9 +670,9 @@ cargo oxichrome build --features overlay,editor,camera
 | Speaker diarization | Model too large for browser-based first release. |
 | Region selection | Complexity too high for MVP. Scoped to P1. |
 | Multiple audio tracks | MVP uses single mixed track (video+audio). Multi-track in P1+. |
-| MP4 export in V0.1 | Requires FFmpeg WASM dependency; V0.1 optimises reliable capture over max interop. |
-| Storage manager UI in V0.1 | Basic download/delete in preview suffices; quota management is V0.3. |
-| Configurable keyboard shortcuts in V0.1 | `chrome.commands` defaults (Alt+Shift+G/M/X) ship as-is; customization UI deferred. |
+| `[NON-GOAL for MVP]` MP4 export in V0.1 | Requires FFmpeg WASM dependency; V0.1 optimises reliable capture over max interop. |
+| `[NON-GOAL for MVP]` Storage manager UI in V0.1 | Basic download/delete in preview suffices; quota management is V0.3. |
+| `[NON-GOAL for MVP]` Configurable keyboard shortcuts in V0.1 | `chrome.commands` defaults (Alt+Shift+G/M/X) ship as-is; customization UI deferred. |
 
 ---
 
@@ -899,13 +910,13 @@ Idle → CrashRecovery → Preview → Idle
 
 | ID | Question | Owner | Resolution Condition |
 |----|----------|-------|---------------------|
-| OQ-01 | Single codec (VP8) or codec ladder with fallback in V0.1? | [TBD] | After first round of user testing on varied hardware |
-| OQ-02 | What is the maximum acceptable WASM binary size? | [TBD] | After measuring cold-load times on mid-tier devices |
+| OQ-01 | Single codec (VP8) or codec ladder with fallback in V0.1? | Engineering lead | After first round of user testing on varied hardware |
+| OQ-02 | What is the maximum acceptable WASM binary size? | Engineering lead | After measuring cold-load times on mid-tier devices |
 | OQ-03 | Should Firefox recording use the same offscreen-document approach or a dedicated background tab? | [TBD] | When Firefox P1 work begins |
-| OQ-04 | What is the right chunk size for OPFS flush? 10s or adaptive based on scene complexity? | [TBD] | After performance benchmarks on baseline hardware |
+| OQ-04 | What is the right chunk size for OPFS flush? 10s or adaptive based on scene complexity? | Engineering lead | After performance benchmarks on baseline hardware |
 | OQ-05 | sherpa-onnx: Zipformer EN vs Moonshine tiny (~20MB each) — which performs better in WASM? | [TBD] | When P2 STT work begins, benchmark both |
-| OQ-06 | What is the minimum Chrome version to support? Currently 120+, but can we go lower? | [TBD] | After checking OPFS and offscreen document availability |
-| OQ-07 | What is the threshold for "re-recording" as a quality signal in a telemetry-free product? | [TBD] | After analyzing session patterns in V0.1 internal dogfooding |
+| OQ-06 | What is the minimum Chrome version to support? Currently 120+, but can we go lower? | Engineering lead | After checking OPFS and offscreen document availability |
+| OQ-07 | What is the threshold for "re-recording" as a quality signal in a telemetry-free product? | Product lead | After analyzing session patterns in V0.1 internal dogfooding |
 
 ### Assumptions
 
