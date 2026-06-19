@@ -6,110 +6,79 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Capture Forge** — a browser extension (Chrome first, Firefox planned) for screen recording and video editing, written in Rust and compiled to WebAssembly via the [oxichrome](https://crates.io/crates/oxichrome) framework.
 
-The product follows a phased roadmap per `docs/product-brief.md` (finalized) and `docs/prd.md`:
+Phased roadmap:
 1. **Recorder Core** (P0, V0.1) — screen/tab capture + mic + pause/resume/stop + WebM export + OPFS storage + crash recovery
 2. **Editor + Overlay** (P1, V0.5) — non-destructive trim/mute/crop, toolbar, canvas annotations, camera PiP, Firefox support, MP4/GIF export
 3. **AI & Semantic** (P2, V2.0+) — local STT (sherpa-onnx/WASM), optional LLM, DOM capture, Audience Lenses
 
-**Key decisions** (per product brief): MIT license, GitHub + Chrome Web Store distribution, Firefox in P1 not P0, local-first/privacy-first positioning.
+**Key decisions:** MIT license, GitHub + Chrome Web Store distribution, Firefox in P1 not P0, local-first/privacy-first positioning.
 
-**Current state:** PRD v1.0 finalized (`docs/prd.md`, `_bmad-output/planning-artifacts/prds/prd-capture-forge-2026-06-19/prd.md`). UX spines finalized (`DESIGN.md` + `EXPERIENCE.md`). Architecture decision document complete (`_bmad-output/planning-artifacts/architecture.md`). Core recording engine not yet implemented — first implementation priority is `recorder.rs` state machine.
+**Current state:** PRD v1.0, UX spines, and architecture are finalized. Story 1.1 (Error System & State Machine Foundation) is `done`. The next implementation target is Story 1.2 (Stream Acquisition).
+
+**Canonical technical reference:** `_bmad-output/planning-artifacts/architecture.md`
+**Product spec:** `_bmad-output/planning-artifacts/prds/prd-capture-forge-2026-06-19/prd.md`
+**Sprint tracking:** `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 ## Prerequisites
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
-# Optional: needed only when regenerating manifest/JS shims
+# Optional: only when regenerating manifest/JS shims
 cargo install cargo-oxichrome
 ```
 
 ## Build Commands
 
 ```bash
-# Fast compile-time validation (no wasm target needed)
+# Fast compile-time validation (wasm32 target not needed)
 cargo check
 
-# Unit tests (native host — pure Rust logic, no browser needed)
+# Unit tests (native host — pure Rust, no browser required)
 cargo test
-cargo test --features editor         # With editor module enabled
-cargo test --features stt            # With transcription module enabled
-
-# Run a single unit test
 cargo test -- <test_name>
-cargo test --lib -- tests::state_machine::test_pause_resume  # Example
+cargo test --lib -- tests::state_machine::test_happy_path_full_cycle  # Example
 
 # WASM tests (requires Chrome headless)
 wasm-pack test --headless --chrome
-wasm-pack test --headless --firefox  # When Firefox support is added
 
-# Recompile Rust → WASM (day-to-day workflow)
+# Recompile Rust → WASM
 wasm-pack build --target web
 
-# Full oxichrome pipeline — regenerates manifest.json, background.js, and JS shims
-cargo oxichrome build          # Debug
-cargo oxichrome build --release  # Optimized
-cargo oxichrome clean          # Remove dist/
+# Full oxichrome pipeline — regenerates manifest.json, background.js, JS shims
+cargo oxichrome build              # Debug
+cargo oxichrome build --release    # Optimised + wasm-opt -Oz
 
-# Feature-gated builds (non-default features)
+# Feature-gated builds
 cargo oxichrome build --no-default-features --features recorder,storage,export
 cargo oxichrome build --features overlay,editor,camera
 
-# E2E tests (Playwright with loaded extension)
+# E2E tests (Playwright with loaded extension — pre-release only)
 npx playwright test tests/e2e/
-npx playwright test tests/e2e/recorder.spec.ts  # Single E2E suite
 ```
 
-### Test strategy (from architecture)
+### Three-tier test strategy
 
-Three tiers:
-- **Unit** → `cargo test` (native host) — state machine, serde roundtrip, chunk header, validation. Every commit.
-- **WASM** → `wasm-pack test --headless --chrome` — OPFS R/W, MediaRecorder lifecycle. CI nightly/pre-release.
-- **E2E** → `npx playwright test` — Record→Stop→Download, Kill SW→Recovery, Pause/Resume. Pre-release.
+| Tier | Command | Scope | Frequency |
+|------|---------|-------|-----------|
+| Unit | `cargo test` | State machine, serde roundtrip, chunk header, validation | Every commit |
+| WASM | `wasm-pack test --headless --chrome` | OPFS R/W, MediaRecorder lifecycle | CI nightly |
+| E2E | `npx playwright test` | Record→Stop→Download, Kill SW→Recovery, Pause/Resume | Pre-release |
 
 ### Build output
 
 ```
 dist/chromium/
-  manifest.json           # Manifest V3 (edit when permissions/entry points change)
+  manifest.json           # Manifest V3 (edit when permissions change)
   background.js           # ES module service worker
   wasm/
-    capture_forge.js      # wasm-bindgen JS glue (regenerated on every wasm-pack build)
-    capture_forge_bg.wasm # WebAssembly binary (~361 KiB debug)
-    capture_forge.d.ts    # TypeScript declarations
+    capture_forge.js      # wasm-bindgen JS glue
+    capture_forge_bg.wasm # WebAssembly binary
 ```
 
-The checked-in manifest and background.js were generated by oxichrome. Edit them directly when adding permissions or entry points.
-
-### Adding a popup or options page
-
-Add `#[oxichrome::popup]` or `#[oxichrome::options_page]` to a Leptos component function in `src/lib.rs`, then run `cargo oxichrome build` (not `wasm-pack` alone — the CLI generates the HTML/JS shims).
-
-## Development Workflow
-
-1. Edit Rust code in `src/lib.rs` or add new modules under `src/`
-2. Run `wasm-pack build --target web`
-3. Load `dist/chromium/` as an unpacked extension at `chrome://extensions/` (Developer mode on)
-4. Inspect the service worker via Extensions → Capture Forge → Service Worker → Console
-
-When changing permissions, extension name, or version, update **both** `src/lib.rs` and `dist/chromium/manifest.json`.
+Edit `manifest.json` and `background.js` directly when adding permissions or entry points. When changing extension name/version, update both `src/lib.rs` and `manifest.json`.
 
 ## Architecture
-
-### Source of truth
-
-The **architecture decision document** (`_bmad-output/planning-artifacts/architecture.md`) is the canonical technical reference. It contains all decisions, patterns, project tree, and implementation validation. The summary below is a quick reference.
-
-### Key architectural decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Module communication | Hybrid — direct Rust calls within core, `ExtensionMessage` IPC to UI surfaces | Performance where it matters, decoupling where it counts |
-| WASM strategy | 2 binaries: `core.wasm` (recorder, storage, export, editor) + `ai.wasm` (STT, LLM, DOM — lazy-loaded, P2+) | AI cold-start never penalizes recording-only users |
-| Error handling | `thiserror` + `RecordingError` enum + `panic::set_hook()` override | No `unwrap()` anywhere. Panic in WASM kills the extension — prevented via custom hook |
-| Chunk format | 32-byte header (magic + index + timestamp + size + XXH3) + raw MediaRecorder blob | Self-describing — recovery works without manifest file |
-| Heartbeat | Ping/pong every 20s from offscreen document to SW | Chrome MV3 kills SW after ~30s idle; offscreen document lifecycle matches recording window |
-| Test strategy | 3-tier: `cargo test` (unit) → `wasm-pack test` (WASM integration) → Playwright (E2E) | 70%+ of logic is pure Rust, testable at native speed without browser |
 
 ### Data flow
 
@@ -130,90 +99,112 @@ Offscreen doc    RecoveryManager (triple verification)
 MediaRecorder)
 ```
 
-### Module layout
+### Module layout (current)
 
 ```
 src/
-├── lib.rs                  # #[oxichrome::extension] entry
-├── background.rs            # Service worker, listeners, message router
-├── messaging.rs             # ExtensionMessage enum (all IPC)
-├── error.rs                 # RecordingError enum (thiserror)
-├── recorder.rs/             # State machine, lifecycle, chunk, stream
-├── storage.rs/              # OPFS writer + IndexedDB fallback (V0.2+)
-├── export.rs/               # WebM concatenation
-├── popup.rs                 # Mode selection UI
-├── preview.rs               # Video player + actions
-├── countdown.rs             # 3‑2‑1 overlay
-├── content_script.rs/       # Overlay toolbar + canvas (P1)
-├── editor.rs/               # Trim/mute/crop (P1)
-├── camera_page.rs           # Camera-only recording (P1)
-├── region_page.rs           # Region selection (P1)
-├── setup.rs                 # Setup wizard (V0.2+)
-├── permissions.rs           # Permission request UI
-└── ai/                      # Separate wasm, lazy-loaded (P2+)
+├── lib.rs                  # Entry point. Module declarations, panic hook, global SESSION
+├── error.rs                # RecordingError enum (thiserror), Result<T> alias
+├── recorder.rs             # SessionState (9 states), RecordingSession, transition()
+├── messaging.rs            # ExtensionMessage (11 variants), RecordingMode
+├── background.rs           # (planned) Service worker, listeners, message router
+├── storage.rs/             # (planned) OPFS writer + IndexedDB fallback
+├── export.rs/              # (planned) WebM concatenation
+├── popup.rs                # (planned) Mode selection UI
+├── preview.rs              # (planned) Video player + actions
+└── ...                     # P1+ modules (feature-gated)
 ```
 
-### Implementation patterns (critical)
+### Key architectural decisions
 
-- **Error handling:** Every public function returns `Result<T, RecordingError>`. No bare `unwrap()` — use `expect("invariant: ...")` with a message describing the invariant.
-- **Exhaustive match:** Always exhaustive on enums (SessionState, ExtensionMessage variants, ChunkStatus). No `_` catch-all without explicit `unreachable!("reason")`.
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Module communication | Hybrid — direct Rust calls within core, `ExtensionMessage` IPC to UI | Performance where it matters, decoupling where it counts |
+| WASM strategy | 2 binaries: `core.wasm` + `ai.wasm` (lazy-loaded, P2+) | AI cold-start never penalizes recording-only users |
+| Error handling | `thiserror` + `RecordingError` + `panic::set_hook()` override | No `unwrap()` anywhere. Panic in WASM kills the extension — prevented via custom hook |
+| State machine | `RecordingSession::transition()` with explicit match matrix + `AtomicBool` re-entrancy guard | Invalid transitions produce `RecordingError::StateViolation`; session state unchanged |
+| Chunk format | 32-byte header (magic + index + timestamp + size + XXH3) + raw MediaRecorder blob | Self-describing — recovery works without manifest file |
+| Heartbeat | Ping/pong every 20s from offscreen doc to SW | Chrome MV3 kills SW after ~30s idle |
+
+### Critical implementation patterns
+
+- **Every public function returns `Result<T, RecordingError>`**. No bare `unwrap()` — use `expect("invariant: ...")` with a message.
+- **Exhaustive match** on all enums. No `_` catch-all without `unreachable!("reason")`.
 - **Derives:** Every data-carrying type: `#[derive(Debug, Clone, Serialize, Deserialize)]`. State enums add `PartialEq, Eq`.
-- **`pub` discipline:** `pub(crate)` by default. `pub` only for interfaces consumed across the message boundary or by external shims.
-- **Feature gates:** V0.1 default = `recorder, storage, export`. P1+ features (`overlay, editor, camera, indexeddb`) must be non-default. Never compile P2 features (`stt, llm, dom`) into the default binary.
-- **Module alias:** Each module defines `type Result<T> = std::result::Result<T, RecordingError>` to avoid importing `Result` everywhere.
+- **`pub` discipline:** `pub(crate)` by default. `pub` only across the message boundary or for external shims.
+- **Module `Result` alias:** Each module defines `type Result<T> = std::result::Result<T, RecordingError>`.
+- **`RecordingSession`** is wrapped in a `OnceLock<Mutex<...>>` global in `lib.rs` for cross-module access (especially the panic hook).
+- **Panic hook** uses `console.error()` (via `#[wasm_bindgen] extern shim), preserves and re-invokes the previous hook, and has an `AtomicBool` re-entrancy guard.
+- **Feature gates:** V0.1 default = `recorder, storage, export`. P1+ features must be non-default. Never compile P2 features into the default binary.
 
-### Constraints
+### State machine transitions (V0.1)
 
-- **Chrome MV3:** Service worker idle timeout ~30s → recording lives in offscreen document, not SW. Heartbeat ping/pong every 20s.
-- **WASM limitations:** No native threading, no SIMD, limited std. JS shims for APIs not in web-sys (tabCapture, FFmpeg, MediaPipe).
-- **OPFS V0.1 only:** No IndexedDB fallback in V0.1 — assumed available on Chrome 120+.
-- **2-WASM:** `core.wasm` contains all P0/P1 code. `ai.wasm` is loaded on-demand in P2+. Build rule: anything not required for "start recording in <2 clicks" must not degrade cold start.
+All 9 states: `Idle`, `Starting`, `Countdown`, `Recording`, `Paused`, `Stopping`, `Preview`, `Error`, `CrashRecovery`.
 
-## Core Dependencies
+Valid transitions:
+```
+Idle → Starting | CrashRecovery
+Starting → Countdown | Error
+Countdown → Recording | Idle | Error
+Recording → Paused | Stopping | Error | Idle
+Paused → Recording | Stopping | Error
+Stopping → Preview | Error
+Preview → Idle
+Error → Idle
+CrashRecovery → Preview | Idle | Error
+```
 
-| Crate | Version | Purpose |
-|---|---|---|
-| `oxichrome` | 0.2 | Proc macros + runtime wrappers for Chrome APIs |
-| `leptos` | 0.7 | Reactive UI (CSR) — popup, preview, overlay |
-| `wasm-bindgen` | 0.2 | Rust↔JS interop |
-| `serde` | 1 | Serialization for messages and storage |
-| `serde-wasm-bindgen` | 0.6 | Serde ↔ wasm-bindgen bridge |
-| `web-sys` | 0.3 | MediaRecorder, MediaStream, Canvas, AudioContext, OPFS |
-| `opfs` | 0.2 | OPFS filesystem access from Rust |
-| `indexed_db_futures` | 0.6 | IndexedDB fallback (V0.2+) |
-| `sherpa-onnx` | 1.13 (optional, P2) | Local STT transcription |
-| `aisdk` | 0.2 (optional, P2) | Cloud LLM integration |
+## Current Dependencies
 
-See `docs/architect.md` for the full Cargo.toml feature set.
+```toml
+[dependencies]
+oxichrome = "0.1"             # Proc macros + Chrome API wrappers
+wasm-bindgen = "0.2"          # Rust↔JS interop (also provides #[wasm_bindgen] for extern shims)
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+```
+
+Additional deps (`leptos`, `web-sys`, `opfs`, `indexed_db_futures`, `sherpa-onnx`, `aisdk`) are declared in the architecture docs but not yet in `Cargo.toml` — they will be added as each story requires them.
+
+## Development Workflow
+
+1. Edit Rust code under `src/`
+2. `wasm-pack build --target web`
+3. Load `dist/chromium/` as unpacked extension at `chrome://extensions/` (Developer mode on)
+4. Inspect service worker via Extensions → Capture Forge → Service Worker → Console
+5. When changing permissions, name, or version: update **both** `src/lib.rs` and `dist/chromium/manifest.json`
+
+Popups and options pages: add `#[oxichrome::popup]` or `#[oxichrome::options_page]` to a Leptos component, then run `cargo oxichrome build` (not `wasm-pack` alone — the CLI generates the HTML/JS shims).
+
+## BMAD Methodology
+
+This project uses structured BMAD workflows for development (skills in `.claude/skills/`, config in `_bmad/`, artifacts in `_bmad-output/`):
+
+- **Sprint Planning** → `bmad-sprint-planning`
+- **Story Creation** → `bmad-create-story`
+- **Story Implementation** → `bmad-dev-story`
+- **Code Review** → `bmad-code-review`
+
+Sprint status tracked in `_bmad-output/implementation-artifacts/sprint-status.yaml`. Story files live in `_bmad-output/implementation-artifacts/stories/`.
 
 ## Project Documentation Index
 
 | File | Purpose |
 |---|---|
-| `docs/product-brief.md` | Finalized product brief — vision, positioning, scope, key choices |
-| `docs/prd.md` | Product requirements — user stories, acceptance criteria, feature flags |
-| `docs/architect.md` | Technical architecture — module layout, build pipeline, perf targets |
-| `docs/ux-designer.md` | UX spec — user journeys, component tree, states, accessibility |
-| `docs/audience-lens-architecture.md` | Vision spec — Semantic Recorder, Lens contract, security model |
-| `docs/sprint-stories-resilient-storage.md` | Sprint-ready stories for chunk lifecycle, triple verification, integrity reports |
-| `_bmad-output/planning-artifacts/architecture.md` | **Architecture decision document** — all decisions, patterns, and implementation validation. Canonical technical reference. |
-| `_bmad-output/planning-artifacts/prds/prd-capture-forge-2026-06-19/prd.md` | **PRD v1.0 (final)** — full product requirements document |
-| `_bmad-output/planning-artifacts/ux-designs/ux-capture-forge-2026-06-19/DESIGN.md` | **UX Design spine** — visual identity, colors, typography, components |
-| `_bmad-output/planning-artifacts/ux-designs/ux-capture-forge-2026-06-19/EXPERIENCE.md` | **UX Experience spine** — IA, states, interactions, flows, accessibility |
-| `_bmad-output/planning-artifacts/research/` | Market, domain, and technical feasibility research reports |
-
-## BMAD Methodology
-
-This project uses BMAD (BMad Agent-Driven) methodology for structured development. Key workflows:
-
-- **Product Brief** → `bmad-product-brief` (finalized)
-- **PRD** → `bmad-prd` (update before implementation)
-- **Architecture** → `bmad-create-architecture`
-- **Sprint Planning** → `bmad-sprint-planning`
-- **Story Development** → `bmad-create-story` → `bmad-dev-story` → `bmad-code-review`
-
-Configuration lives in `_bmad/`, generated artifacts in `_bmad-output/`. The `.claude/skills/` directory contains installed BMAD skill definitions.
+| `_bmad-output/planning-artifacts/architecture.md` | **Canonical architecture — all decisions, patterns, project tree** |
+| `_bmad-output/planning-artifacts/epics.md` | Epic breakdown, requirements inventory, FR coverage map, all stories |
+| `_bmad-output/planning-artifacts/prds/prd-capture-forge-2026-06-19/prd.md` | PRD v1.0 — user stories, acceptance criteria, message protocol, NFRs |
+| `_bmad-output/planning-artifacts/ux-designs/ux-capture-forge-2026-06-19/DESIGN.md` | Visual identity — colors, typography, spacing, components |
+| `_bmad-output/planning-artifacts/ux-designs/ux-capture-forge-2026-06-19/EXPERIENCE.md` | UX — IA, states, flows, interactions, accessibility |
+| `_bmad-output/implementation-artifacts/1-1-error-system-state-machine-foundation.md` | Story 1.1 — completed implementation |
+| `_bmad-output/implementation-artifacts/sprint-status.yaml` | Sprint tracking — epic and story status |
+| `docs/architect.md` | Technical architecture reference |
+| `docs/product-brief.md` | Product vision, positioning, scope |
+| `docs/prd.md` | Pre-finalization PRD |
 
 ## Permissions
 
-Currently declared: `"storage"`. Add permissions to the `#[oxichrome::extension(...)]` attribute in `src/lib.rs` **and** to `dist/chromium/manifest.json`.
+Currently declared: `"storage"`. Future: `unlimitedStorage`, `desktopCapture`, `tabCapture`, `downloads`. Add permissions to both `#[oxichrome::extension(...)]` in `src/lib.rs` **and** `dist/chromium/manifest.json`.
