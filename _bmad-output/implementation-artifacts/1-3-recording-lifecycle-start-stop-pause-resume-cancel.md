@@ -604,6 +604,29 @@ MediaRecorder, Blob, BlobEvent, Event
 - Pause/resume cycle with double-resume guard
 - Cancel releases resources
 
+### Senior Developer Review (AI)
+
+**Review date:** 2026-06-19
+**Review outcome:** Changes Requested
+**Total action items:** 11 (3 High, 4 Med, 4 Low)
+
+#### Action Items
+
+- [ ] [Review][Patch] **Raw pointer `on_chunk_ptr` → UB si le struct bouge** [`src/lifecycle.rs:416-443`] — Le closure `ondataavailable` capture un raw pointer vers `self.on_chunk`. `RecordingLifecycle` n'est pas `Pin` → si le struct est déplacé (Vec::push, Option::take, etc.), le pointer devient dangling. Fix: stocker derrière un `Pin`, ou remplacer par `Rc<RefCell<...>>`, ou utiliser un design sans raw pointer. (severity: High)
+- [ ] [Review][Patch] **`cancel()` droppe closures avant `stop()` async → UAF** [`src/lifecycle.rs:218-237`] — `cancel()` appelle `release_resources()` qui droppe les closures, puis `MediaRecorder.stop()` (async) peut encore déclencher des événements sur les closures libérées. Fix: clear les handlers JS (`set_onstop(None)`) AVANT de dropper les closures. (severity: High)
+- [ ] [Review][Patch] **`onerror`/`onstop` no-ops → désync silencieux d'état** [`src/lifecycle.rs:447-464`] — Les deux closures sont vides. Stream stoppé, erreur d'encodeur, ou arrêt inattendu → le lifecycle reste en `Active`/`Paused` sans que personne ne soit notifié. Fix: logger l'erreur dans `onerror`; synchroniser l'état ou notifier un callback dans `onstop`. (severity: High)
+- [ ] [Review][Patch] **`stop()` race avec dernier chunk + fuite si `start()` échoue** [`src/lifecycle.rs:240-255, 468-472`] — `stop()` passe en `Stopped` avant que le dernier `ondataavailable` ait eu le temps de tirer. Et si `start_with_timeslice()` échoue après avoir stocké les closures, les ressources stream ne sont pas nettoyées. Fix: inverser l'ordre (consommer le dernier chunk avant `Stopped`); cleanup sur échec de `start()`. (severity: Med)
+- [ ] [Review][Patch] **`current_time()` horloge non-monotonique en natif** [`src/lifecycle.rs:286-303`] — En non-WASM, `SystemTime::now()` est une horloge murale qui peut reculer (NTP, DST), produisant des durées négatives. Fix: utiliser `std::time::Instant` pour le fallback natif. (severity: Med)
+- [ ] [Review][Patch] **Pas d'impl `Drop` → enregistrements orphelins** [`src/lifecycle.rs` struct-level] — Si un `RecordingLifecycle` en `Active`/`Paused` est dropped sans `stop()`/`cancel()`, le MediaRecorder n'est pas arrêté, les tracks ne sont pas stoppés, l'AudioContext n'est pas fermé. Fix: implémenter `Drop` qui appelle `release_resources()` si pas déjà fait. (severity: Med)
+- [ ] [Review][Patch] **Méthodes `pub` au lieu de `pub(crate)`** [`src/lifecycle.rs`] — `start()`, `pause()`, `resume()`, `stop()`, `cancel()`, `duration_ms()`, `is_paused()`, `set_on_chunk()` sont toutes `pub` alors que la spec demande `pub(crate)` par défaut. Fix: passer en `pub(crate)`. (severity: Med)
+- [ ] [Review][Patch] **Erreurs JS jetées dans `map_err(|_| ...)`** [`src/lifecycle.rs:406, 155, 176, 203`] — Les détails des exceptions JS (`MediaRecorderError`, `InvalidStateError`) sont perdus. Le message "Failed to ... MediaRecorder" n'aide pas au debug. Fix: inclure l'erreur JS dans le message d'erreur. (severity: Low)
+- [ ] [Review][Patch] **`mic_track.stop()` appelé deux fois** [`src/lifecycle.rs:358`] — `release_resources()` arrête d'abord toutes les tracks du stream (qui inclut la mic_track si elle fait partie du stream), puis arrête `mic_track` individuellement. Fix: supprimer la deuxième ligne, ou conditionner sur `mic_track` n'étant pas dans le stream. (severity: Low)
+- [ ] [Review][Patch] **`Debug` manquant sur `RecordingLifecycle`** [`src/lifecycle.rs:49`] — La spec demande un `Debug` manuel pour les types contenant des handles web-sys opaques. Fix: ajouter un `impl Debug` manuel. (severity: Low)
+- [ ] [Review][Patch] **Erreur `recorder.stop()` avalée dans `cancel()`** [`src/lifecycle.rs:230`] — `let _ = recorder.stop()` ignore toute erreur JS (ex: appel sur un recorder déjà `inactive`). Fix: logger l'erreur via `console.error()`. (severity: Low)
+
+- [x] [Review][Defer] **Tests `double_cancel()` bypassent le vrai lifecycle** — deferred, pre-existing: les tests natifs ne peuvent pas créer de vrai MediaRecorder. Le test WASM `test_cancel_releases_resources` couvre le scénario réel.
+- [x] [Review][Defer] **Fallback MIME limité à WebM (Firefox P1)** — deferred, pre-existing: le support Firefox est prévu en P1 (Story 5.4). Chrome supporte `video/webm; codecs=vp8,opus`. La liste sera étendue à ce moment-là.
+
 ### Guardrails for the dev agent
 
 1. **MediaRecorder is a web-sys type, not a JS type** — use `web_sys::MediaRecorder`, not a manual shim.
