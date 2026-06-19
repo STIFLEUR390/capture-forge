@@ -3,19 +3,18 @@
 // Used by the Rust stream acquisition module via wasm-bindgen.
 
 // Tab capture — returns a Promise<{ streamId: string }>.
-// chrome.tabCapture is only available from the service worker
+// Uses chrome.tabCapture.getMediaStreamId() to produce a chromeMediaSourceId
+// that can be passed to getUserMedia() in the offscreen document for stream
+// reconstruction.  chrome.tabCapture is only available from the service worker
 // background context, not from offscreen documents.
 export function tabCaptureCapture() {
     return new Promise((resolve, reject) => {
-        chrome.tabCapture.capture(
-            { audio: true, video: true },
-            (stream) => {
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                } else {
-                    resolve({ streamId: stream.id });
-                }
+        chrome.tabCapture.getMediaStreamId({}, (response) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+            } else {
+                resolve({ streamId: response.streamId });
             }
-        );
+        });
     });
 }

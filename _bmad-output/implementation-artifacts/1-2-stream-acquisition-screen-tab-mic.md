@@ -4,7 +4,7 @@ baseline_commit: 4f424600bb246fb81a2d1a4b5d8122af89686e46
 
 # Story 1.2: Stream Acquisition — Screen, Tab & Mic
 
-Status: review
+Status: done
 
 ## Story
 
@@ -478,3 +478,36 @@ Claude Opus 4.8
 | 2026-06-19 | Extended RecordingSession with mode/mic/session_id state |
 | 2026-06-19 | Updated permissions and Cargo.toml dependencies |
 | 2026-06-19 | Added 59 unit tests + WASM test scaffold |
+
+---
+
+## Senior Developer Review (AI)
+
+**Review Date:** 2026-06-19
+**Review Outcome:** Changes Requested
+
+### Action Items
+
+#### Patch (fixable without human input)
+
+- [x] [Review][Patch] **mix_audio loses video tracks** [`src/stream.rs`] — Fixed: combined stream now copies video tracks from source + mixed audio from destination.
+- [x] [Review][Patch] **AudioContext never resumed → silent audio** [`src/stream.rs`] — Fixed: `ctx.resume()` called fire-and-forget after creation in both `mix_audio()` and the no-audio path.
+- [x] [Review][Patch] **Tab shim uses wrong API** [`js/chrome_shim.js`] — Fixed: switched from `chrome.tabCapture.capture()` to `chrome.tabCapture.getMediaStreamId()`.
+- [x] [Review][Patch] **Resource leak on partial acquisition failure** [`src/stream.rs`] — Fixed: `StreamGuard` drop-guard stops all acquired tracks if acquisition fails mid-way.
+- [x] [Review][Patch] **No context-mode validation** [`src/stream.rs`] — Fixed: `acquire()` checks context before dispatching to mode-specific functions.
+- [x] [Review][Patch] **confirm() unreliable in offscreen doc** [`src/stream.rs`] — Fixed: `default_mic_denied_handler` falls back to `true` (continue without mic) when `confirm()` is unavailable.
+- [x] [Review][Patch] **No post-acquisition video check** [`src/stream.rs`] — Fixed: `acquire()` verifies the stream has video tracks before proceeding.
+- [x] [Review][Patch] **Empty streamId silently accepted** [`src/stream.rs`] — Fixed: added `is_empty()` guard after streamId extraction.
+- [x] [Review][Patch] **Missing audio mixer unit tests** (AC6) — Fixed: added `test_audio_mixer_no_mic` and `test_audio_mixer_no_audio_source` to WASM test module.
+- [x] [Review][Patch] **Missing Serialize/Deserialize derives** (Constraint 3) — Fixed: added derives to `RecordingSession`; `AcquiredStream` cannot derive these due to opaque web-sys types.
+- [x] [Review][Patch] **Error message mismatch with UX-DR17** — Fixed: all user-facing error messages now match the UX-DR17 specification.
+- [x] [Review][Patch] **init_session_id suffix is redundant** [`src/recorder.rs`] — Fixed: replaced with thread-local monotonic counter for actual uniqueness.
+
+#### Deferred (pre-existing, not actionable now)
+
+- [x] [Review][Defer] **Tab capture returns empty MediaStream** [`src/stream.rs:200-210`] — Known V0.1 limitation: `acquire_tab()` returns a dummy `MediaStream::new()` with no tracks. Full tab stream reconstruction in the offscreen document will be implemented in Story 1.3+.
+- [x] [Review][Defer] **Temp mic stream not explicitly owned** [`src/stream.rs:400-413`] — The temporary `MediaStream` wrapping the mic track in `mix_audio()` is held only by the audio graph. Minor GC concern; no correctness impact.
+- [x] [Review][Defer] **get_display_media without constraints** [`src/stream.rs:170-175`] — Current code calls the no-argument overload. Futures enhancements (e.g., preferring monitor/tab) can add constraints later.
+- [x] [Review][Defer] **getUserMedia fails in SW context (Tab+mic)** [`src/stream.rs:274-331`] — Architectural issue: Tab mode runs in the SW context where `window` is null and `getUserMedia` fails. This will be resolved when the offscreen document handoff is implemented (Story 1.3+), separating mic acquisition into the DOM-capable context.
+- [x] [Review][Defer] **Race window in async acquire()** [`src/stream.rs:117-154`] — Orchestrator concern for Story 1.3+. The orchestrator must handle the case where `session.transition(Countdown)` fails because a cancel/error occurred during the async `.await` gap.
+- [x] [Review][Defer] **AcquiredStream cannot cross Send boundary** [`src/stream.rs:25-33`] — `MediaStream`, `AudioContext`, and `MediaStreamTrack` are `!Send` and `!Sync`. The stream must be kept outside `RecordingSession` and managed ephemerally by the orchestrator.

@@ -49,7 +49,7 @@ impl SessionState {
 /// In addition to the current state, the session carries stream acquisition
 /// configuration (`mode`, `mic_enabled`) and a unique `session_id` generated
 /// when recording starts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingSession {
     state: SessionState,
     /// The recording mode selected by the user (set before starting).
@@ -128,8 +128,9 @@ impl RecordingSession {
 
     /// Generate a new unique session ID and store it.
     ///
-    /// Uses a timestamp + random suffix for uniqueness.  The ID is
-    /// human-readable for debugging purposes.
+    /// Uses a timestamp + millisecond counter for uniqueness even when
+    /// multiple IDs are generated within the same clock tick.
+    /// The ID is human-readable for debugging purposes.
     pub fn init_session_id(&mut self) {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -138,9 +139,12 @@ impl RecordingSession {
             .map(|d| d.as_millis())
             .unwrap_or(0);
 
-        // 8-character hex suffix from the lower bits of the timestamp
-        let suffix = (ts & 0xFFFF_FFFF) as u32;
-        self.session_id = Some(format!("rec_{:x}_{:08x}", ts, suffix));
+        // Thread-local counter ensures uniqueness within the same ms.
+        static COUNTER: std::sync::atomic::AtomicU16 =
+            std::sync::atomic::AtomicU16::new(0);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        self.session_id = Some(format!("rec_{:x}_{:04x}", ts, seq));
     }
 
     /// Attempt a state transition.

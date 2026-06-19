@@ -4,6 +4,15 @@ Tracking items deferred from code reviews that are not yet actionable but should
 
 ---
 
+## Deferred from: code review of 1-2-stream-acquisition-screen-tab-mic (2026-06-19)
+
+- Tab capture returns empty MediaStream — `acquire_tab()` returns a dummy stream. Full reconstruction depends on offscreen doc infrastructure in Story 1.3+.
+- Temp mic stream not explicitly owned — minor GC concern in `mix_audio()`; no correctness impact.
+- get_display_media without constraints — future enhancement; works correctly now without them.
+- getUserMedia fails in SW context (Tab+mic) — architectural issue resolved when offscreen document handoff is implemented.
+- Race window in async acquire() — orchestrator concern in Story 1.3+.
+- AcquiredStream cannot cross Send boundary — `!Send` types prevent storing stream in `RecordingSession`; managed ephemerally.
+
 ## Deferred from: code review of 1-1-error-system-state-machine-foundation (2026-06-19)
 
 - No message routing — ExtensionMessage variants are dead letters (routing implemented in background.rs in later stories)
