@@ -1,0 +1,1 @@
+- [Brainstorming Session — Recorder Core](brainstorming-session-recorder-core.md) — 23 idées: Recorder Sémantique, résilience truth-first, écosystème sécurisé
