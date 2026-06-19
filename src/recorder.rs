@@ -82,14 +82,18 @@ impl RecordingSession {
             // Countdown
             (SessionState::Countdown, SessionState::Recording) => true,
             (SessionState::Countdown, SessionState::Idle) => true,
+            (SessionState::Countdown, SessionState::Error) => true,
 
             // Recording
             (SessionState::Recording, SessionState::Paused) => true,
             (SessionState::Recording, SessionState::Stopping) => true,
+            (SessionState::Recording, SessionState::Error) => true,
+            (SessionState::Recording, SessionState::Idle) => true,
 
             // Paused
             (SessionState::Paused, SessionState::Recording) => true,
             (SessionState::Paused, SessionState::Stopping) => true,
+            (SessionState::Paused, SessionState::Error) => true,
 
             // Stopping
             (SessionState::Stopping, SessionState::Preview) => true,
@@ -104,6 +108,7 @@ impl RecordingSession {
             // CrashRecovery
             (SessionState::CrashRecovery, SessionState::Preview) => true,
             (SessionState::CrashRecovery, SessionState::Idle) => true,
+            (SessionState::CrashRecovery, SessionState::Error) => true,
 
             // Everything else is invalid
             _ => false,
@@ -298,19 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_in_paused() {
-        let mut s = RecordingSession::new();
-        s.transition(SessionState::Starting).unwrap();
-        s.transition(SessionState::Countdown).unwrap();
-        s.transition(SessionState::Recording).unwrap();
-        s.transition(SessionState::Paused).unwrap();
-        // Paused → Stopping IS valid — verified elsewhere.  Test a clearly
-        // invalid one: Paused → Starting.
-        let err = s.transition(SessionState::Starting).unwrap_err();
-        assert!(matches!(err, RecordingError::StateViolation { .. }));
-    }
-
-    #[test]
     fn test_pause_in_idle() {
         let mut s = RecordingSession::new();
         let err = s.transition(SessionState::Paused).unwrap_err();
@@ -361,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cancel_in_idle() {
+    fn test_idle_to_idle_self_transition() {
         let mut s = RecordingSession::new();
         let err = s.transition(SessionState::Idle).unwrap_err();
         assert!(matches!(err, RecordingError::StateViolation { .. }));
@@ -369,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cancel_in_stopping() {
+    fn test_stopping_to_idle_rollback() {
         let mut s = RecordingSession::new();
         s.transition(SessionState::Starting).unwrap();
         s.transition(SessionState::Countdown).unwrap();

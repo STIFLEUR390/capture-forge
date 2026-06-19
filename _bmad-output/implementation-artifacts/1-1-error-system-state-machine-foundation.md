@@ -4,7 +4,7 @@ baseline_commit: 4f424600bb246fb81a2d1a4b5d8122af89686e46
 
 # Story 1.1: Error System & State Machine Foundation
 
-Status: review
+Status: done
 
 ## Story
 
@@ -342,6 +342,34 @@ Claude Opus 4.8
 - Added `serde_json` as dev-dependency for test roundtrips
 - Added 43 unit tests covering: Display format for all error variants, serde roundtrips for all message types, every valid transition path, 15+ invalid transition edge cases, state predicates (is_idle, is_active)
 - All tests pass, no bare `unwrap()` in production code
+
+### Review Findings
+
+#### Decision needed
+
+- [x] [Review][Decision] CancelRecording during Recording: add `Recording→Idle` — resolved (option A)
+
+#### Patch items
+
+- [x] [Review][Patch] `panic::take_hook()` incorrectly removes hook after first panic [src/lib.rs:57-60] — fixed: proper chaining with `prev` capture + re-invocation
+- [x] [Review][Patch] Missing Error transitions from `Recording`, `Paused`, `Countdown` [src/recorder.rs] — fixed: added `Recording→Error`, `Paused→Error`, `Countdown→Error`
+- [x] [Review][Patch] Missing `CrashRecovery→Error` transition [src/recorder.rs] — fixed: added `CrashRecovery→Error`
+- [x] [Review][Patch] Panic hook double-panic guard missing [src/lib.rs:39-64] — fixed: added `PANICKING` AtomicBool re-entrancy guard
+- [x] [Review][Patch] RecordingError::Panic never constructed [src/lib.rs:53-55] — acknowledged; panic details logged via console.error but not stored in session (Error state transition still occurs; full error context storage is a future concern)
+- [x] [Review][Patch] `test_stop_in_paused` is misnamed / copy-pasted [src/recorder.rs] — fixed: removed duplicate test (Paused→Starting already covered by `test_start_in_paused`)
+- [x] [Review][Patch] Rename misnamed tests `test_cancel_in_idle` and `test_cancel_in_stopping` [src/recorder.rs] — fixed: renamed to `test_idle_to_idle_self_transition` and `test_stopping_to_idle_rollback`
+- [x] [Review][Patch] Panic hook uses `log!` (console.log) not `console.error` [src/lib.rs:46] — fixed: uses `error()` extern shim targeting `console.error`
+
+#### Deferred items
+
+- [x] [Review][Defer] No message routing — ExtensionMessage variants are dead letters — deferred, out of scope for Story 1.1 (routing implemented in background.rs in later stories)
+- [x] [Review][Defer] Starting→Idle not allowed (cancellation during stream acquisition forces Error UI) — deferred, related to CancelRecording decision above; depends on product choice
+- [x] [Review][Defer] Error wrapping — no `#[source]` or `#[from]` on RecordingError variants — deferred, V0.1 simplicity; structured error chaining can be added in V0.2+
+- [x] [Review][Defer] No session identifier or metadata in RecordingSession — deferred, Story 1.3+ when lifecycle is implemented
+- [x] [Review][Defer] No SW restart detection / state reconciliation — deferred, Story 1.8 (Crash Recovery)
+- [x] [Review][Defer] RecordingError `code: String` in ExtensionMessage has no validation — deferred, Story 1.3+ when message routing is built
+- [x] [Review][Defer] RecordingSession missing serde derives (SessionState has them) — deferred, add when serialization is needed in V0.2+
+- [x] [Review][Defer] ApplyStreamingData `data: String` has no format contract — deferred, format defined when streaming data module is implemented
 
 ### File List
 

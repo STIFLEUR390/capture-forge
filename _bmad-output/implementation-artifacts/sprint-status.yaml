@@ -44,7 +44,7 @@ story_location: /var/home/herold/Project/extensions/capture-forge/_bmad-output/i
 development_status:
   # Epic 1: Recorder Core (V0.1, P0)
   epic-1: in-progress
-  1-1-error-system-state-machine-foundation: in-progress
+  1-1-error-system-state-machine-foundation: review
   1-2-stream-acquisition-screen-tab-mic: backlog
   1-3-recording-lifecycle-start-stop-pause-resume-cancel: backlog
   1-4-chunk-writer-foundation: backlog
