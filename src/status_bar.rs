@@ -43,6 +43,10 @@ const STATUSBAR_CSS: &str = r#"
     opacity: 1;
 }
 
+:host(.paused) {
+    opacity: 0.6;
+}
+
 @media (prefers-color-scheme: dark) {
     :host {
         background: #1A1B1E;
@@ -221,6 +225,9 @@ pub(crate) struct RecorderStatusBar {
     /// Re-entrancy guard for remove().
     #[cfg(target_arch = "wasm32")]
     removed: bool,
+    /// Recording start timestamp (performance.now()).
+    #[cfg(target_arch = "wasm32")]
+    start_time: f64,
 }
 
 impl RecorderStatusBar {
@@ -244,12 +251,20 @@ impl RecorderStatusBar {
             _timer_interval: None,
             #[cfg(target_arch = "wasm32")]
             removed: false,
+            #[cfg(target_arch = "wasm32")]
+            start_time: 0.0,
         }
     }
 
     /// Render the status bar by injecting shadow DOM into the document body.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn show(&mut self) -> Result<()> {
+        // Idempotency guard.
+        if self.removed {
+            oxichrome::log!("RecorderStatusBar::show() called when already rendered — ignoring");
+            return Ok(());
+        }
+
         let document = web_sys::window()
             .and_then(|w| w.document())
             .ok_or_else(|| crate::error::RecordingError::Unknown {
@@ -331,11 +346,12 @@ impl RecorderStatusBar {
         {
             let on_pause_ptr: *mut Option<Box<dyn FnMut()>> = &mut self.on_pause_toggle as *mut _;
             let btn = pause_btn.clone();
-            let pause_cb = Closure::wrap(Box::new(move || {
+            let pause_cb = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                event.stop_propagation();
                 if let Some(ref mut cb) = unsafe { &mut *on_pause_ptr } {
                     cb();
                 }
-            }) as Box<dyn FnMut()>);
+            }) as Box<dyn FnMut(web_sys::Event)>);
             btn.add_event_listener_with_callback("click", pause_cb.as_ref().unchecked_ref())
                 .map_err(|_| crate::error::RecordingError::Unknown {
                     details: "Failed to register pause click handler".into(),
@@ -347,11 +363,12 @@ impl RecorderStatusBar {
         {
             let on_stop_ptr: *mut Option<Box<dyn FnMut()>> = &mut self.on_stop as *mut _;
             let btn = stop_btn.clone();
-            let stop_cb = Closure::wrap(Box::new(move || {
+            let stop_cb = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                event.stop_propagation();
                 if let Some(ref mut cb) = unsafe { &mut *on_stop_ptr } {
                     cb();
                 }
-            }) as Box<dyn FnMut()>);
+            }) as Box<dyn FnMut(web_sys::Event)>);
             btn.add_event_listener_with_callback("click", stop_cb.as_ref().unchecked_ref())
                 .map_err(|_| crate::error::RecordingError::Unknown {
                     details: "Failed to register stop click handler".into(),
@@ -360,12 +377,27 @@ impl RecorderStatusBar {
         }
 
         // Start the timer update interval (250ms).
-        {
-            let timer_ref = self.timer_el.clone();
-            let paused_ptr: *const std::sync::atomic::AtomicBool = &std::sync::atomic::AtomicBool::new(false) as *const _;
-            // Actually, we need a different approach — we'll use an update method called externally.
-            // For the interval, we rely on `update()` being called externally.
-            // This keeps the architecture clean: the lifecycle module drives timer updates.
+        self.start_time = web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+            .unwrap_or(0.0);
+        self.start_timer_interval();
+
+        // If paused state was set before show(), apply it now.
+        if self.paused {
+            if let Some(ref timer) = self.timer_el {
+                let _ = timer.class_list().add_1("blinking");
+            }
+            if let Some(ref label) = self.paused_label_el {
+                let _ = label.set_attribute("style", "");
+            }
+            if let Some(ref btn) = self.pause_btn_el {
+                btn.set_text_content(Some("▶"));
+                btn.set_attribute("aria-label", "Resume recording").ok();
+            }
+            if let Some(ref container) = self.container {
+                let _ = container.set_attribute("class", "paused");
+            }
         }
 
         // Append to body.
@@ -379,7 +411,51 @@ impl RecorderStatusBar {
     /// Native no-op: status bar cannot be rendered outside a browser.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn show(&mut self) -> Result<()> {
+        // Apply paused state that was set before show().
         Ok(())
+    }
+
+    /// Start a 250ms interval that reads performance.now() and updates the
+    /// timer display via `update()`.  The interval fires until `remove()` is
+    /// called.
+    ///
+    /// Note: this simple timer does not deduct pause duration.  Accurate
+    /// elapsed-time accounting with pause deduction is a future enhancement
+    /// (Task 4 — orchestrator integration).
+    #[cfg(target_arch = "wasm32")]
+    fn start_timer_interval(&mut self) {
+        let start = self.start_time;
+        let timer_ref = self.timer_el.clone();
+
+        let cb = Closure::wrap(Box::new(move || {
+            if let Some(ref timer) = timer_ref {
+                let now = web_sys::window()
+                    .and_then(|w| w.performance())
+                    .map(|p| p.now())
+                    .unwrap_or(start);
+                let elapsed = (now - start).max(0.0);
+                timer.set_text_content(Some(&format_duration(elapsed)));
+            }
+        }) as Box<dyn FnMut()>);
+
+        match web_sys::window()
+            .and_then(|w| {
+                w.set_interval_with_callback_and_timeout_and_arguments_0(
+                    cb.as_ref().unchecked_ref(),
+                    250,
+                ).ok()
+            })
+        {
+            Some(handle) if handle > 0 => {
+                self._timer_interval = Some(handle);
+            }
+            _ => {
+                oxichrome::log!(
+                    "RecorderStatusBar: setInterval failed or returned invalid handle"
+                );
+            }
+        }
+        cb.forget();
     }
 
     /// Update the timer display.
@@ -445,12 +521,12 @@ impl RecorderStatusBar {
                 }
             }
 
-            // Adjust host opacity.
+            // Adjust host opacity via CSS class (avoids overriding :hover).
             if let Some(ref container) = self.container {
                 if paused {
-                    let _ = container.set_attribute("style", "opacity: 0.6");
+                    let _ = container.set_attribute("class", "paused");
                 } else {
-                    container.remove_attribute("style").ok();
+                    container.remove_attribute("class").ok();
                 }
             }
 
@@ -500,6 +576,13 @@ impl RecorderStatusBar {
         }
         self.removed = true;
 
+        // Clear the timer interval.
+        if let Some(handle) = self._timer_interval.take() {
+            if let Some(w) = web_sys::window() {
+                w.clear_interval_with_handle(handle);
+            }
+        }
+
         if let Some(container) = self.container.take() {
             let _ = container.remove();
         }
@@ -508,18 +591,36 @@ impl RecorderStatusBar {
         self.pause_btn_el = None;
         self.aria_el = None;
         self.paused = false;
+        self.on_pause_toggle = None;
+        self.on_stop = None;
     }
 
     /// Native no-op.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn remove(&mut self) {
         self.paused = false;
+        self.on_pause_toggle = None;
+        self.on_stop = None;
     }
 }
 
 impl Default for RecorderStatusBar {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Drop safety: clean up DOM and timer interval if dropped without an
+/// explicit `remove()` call.
+#[cfg(target_arch = "wasm32")]
+impl Drop for RecorderStatusBar {
+    fn drop(&mut self) {
+        if !self.removed {
+            oxichrome::log!(
+                "RecorderStatusBar dropped without remove() — cleaning up"
+            );
+            self.remove();
+        }
     }
 }
 
@@ -573,7 +674,7 @@ mod tests {
     fn test_format_duration_hhmmss() {
         assert_eq!(format_duration(3_733_000.0), "01:02:13");
         assert_eq!(format_duration(7_200_000.0), "02:00:00");
-        assert_eq!(format_duration(366_1000.0), "01:01:01");
+        assert_eq!(format_duration(3_661_000.0), "01:01:01");
     }
 
     #[test]

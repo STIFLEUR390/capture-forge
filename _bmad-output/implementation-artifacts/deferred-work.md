@@ -38,3 +38,8 @@ Tracking items deferred from code reviews that are not yet actionable but should
 - `i as u32` truncation on 64-bit platforms [src/export.rs:48] — MAX_CHUNK_INDEX = 999,999 prevents u32 overflow in practice. Deferred, pre-existing architecture constraint.
 - `usize` overflow in `total_size` sum on 32-bit WASM [src/export.rs:131] — Real recordings <2GB in WASM memory. Allocation would fail gracefully first. Deferred, pre-existing architecture constraint.
 - Benchmark in unit tests rather than `#[bench]` [src/export.rs:tests] — `#[bench]` is unstable and criterion is not available. Acceptable as `#[test]` for V0.1.
+
+## Deferred from: code review of 1-6-countdown-recorder-status-bar (2026-06-20)
+
+- 5 spec-required unit tests missing (pause label accessor, icon state, CSS class checks, WASM injection tests) — requires adding accessor methods to native struct. Low priority, spec coverage vs implementation depth trade-off.
+- Task 4 (background router wiring) explicitly deferred — integration dependent on future orchestrator work.

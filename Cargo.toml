@@ -38,7 +38,6 @@ web-sys = { version = "0.3", features = [
     "ShadowRootMode",
     "KeyboardEvent",
     "HtmlElement",
-    "HtmlDivElement",
     "HtmlSpanElement",
     "Node",
     "Performance",

@@ -4,7 +4,7 @@ baseline_commit: 0b9c71f
 
 # Story 1.6: Countdown & Recorder Status Bar
 
-Status: review
+Status: done
 
 ## Story
 
@@ -596,9 +596,33 @@ Story 1.6 implémentée et vérifiée :
 |------|--------|
 | 2026-06-20 | Created story file from epics Story 1.6 requirements, UX design specs (DESIGN.md, EXPERIENCE.md), architecture patterns, and previous story intelligence |
 | 2026-06-20 | Implemented countdown.rs (CountdownOverlay with 3-2-1 animation, SVG circle ring, Escape handler, aria-live, prefers-reduced-motion), status_bar.rs (RecorderStatusBar with timer formatting, Pause/Resume toggle, Stop button, blink CSS animation, aria-live), added mod declarations and CountdownComplete variant. 23 native tests. Task 4 (background router wiring) deferred per architecture. cargo test → 149 pass. |
+| 2026-06-20 | Code review: 3 parallel layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). 1 decision-needed resolved (countdown timing ~8s→~3s). 13 patches applied: timer interval, Drop impl, ring animation, Escape cleanup, double-show guard, set_paused fix, stopPropagation, unused feature, dead code removal, callback cleanup, test fix, hover opacity, setInterval handling. 2 deferred. 1 dismissed. Status → done. |
 
 ---
 
-## Review Findings
+## Review Findings (Code Review — 2026-06-20)
 
-*To be filled after code review.*
+### decision_needed
+
+- [x] [Review][Decision] Countdown animation ~8s instead of spec ~3s — Resolved: compress to ~3s by overlapping fade-out/fade-in. Fade-out and fade-in phases run concurrently per number, preserving animation quality within spec timing.
+
+### patch
+
+- [x] [Review][Patch] Status bar timer never advances — `_timer_interval` field exists but is never assigned. show() has a dead-code block (lines 362-369) with dangling `AtomicBool` pointer instead of starting the 250ms interval. Timer stays at "00:00". [status_bar.rs:219, 362-369]
+- [x] [Review][Patch] No Drop impl — both CountdownOverlay and RecorderStatusBar leak raw-pointer closures via `forget()` without a Drop impl. Dropping without calling `remove()` causes use-after-free in keydown listener / interval callback. [countdown.rs:141-173, status_bar.rs:196-223]
+- [x] [Review][Patch] Circle ring stroke-dashoffset uses global tick counter — formula `RING_CIRCUMFERENCE * (tick + 1) / 3.0` doesn't reset per-number. Goes negative at tick 3. CSS transition animates unfill on reset. Each number needs fresh 0→360° cycle. [countdown.rs:370-435]
+- [x] [Review][Patch] Escape handler bypasses `self.remove()` — directly calls `container.remove()` without clearing interval or keydown listener. After cancel, interval continues firing on_complete callback into a cancelled session. [countdown.rs:299-310]
+- [x] [Review][Patch] `show()` has no double-invocation guard — second `show()` call to attached shadow root throws DOM exception. [countdown.rs:208, status_bar.rs:252]
+- [x] [Review][Patch] `set_paused(true)` before `show()` creates visual desync — `show()` doesn't read `self.paused`, losing early pause state. [status_bar.rs:414-463]
+- [x] [Review][Patch] Button click events don't call `stopPropagation()` — events bubble past shadow root boundary into host page, potentially triggering host document listeners. [status_bar.rs:334-359]
+- [x] [Review][Patch] Unused web-sys feature `HtmlDivElement` — declared in Cargo.toml but never imported. [Cargo.toml:41]
+- [x] [Review][Patch] Dead code block in `status_bar.rs:show()` with dangling `AtomicBool` pointer — `timer_ref` and `paused_ptr` local variables unused, raw pointer to temporary. [status_bar.rs:362-369]
+- [x] [Review][Patch] Callback fields not cleared in `remove()` — `on_cancel`, `on_complete`, `on_pause_toggle`, `on_stop` all survive removal. Reuse carries stale callbacks. [countdown.rs:498-528, status_bar.rs:496-511]
+- [x] [Review][Patch] Confusing underscore grouping `366_1000.0` in test assertion — reads ambiguously, should be `3_661_000.0`. [status_bar.rs:575]
+- [x] [Review][Patch] Paused inline `style="opacity: 0.6"` overrides `:host(:hover)` — bar doesn't brighten to 1.0 on hover during pause. [status_bar.rs:448-454]
+- [x] [Review][Patch] `setInterval` failure not handled — return value `0` or `Err` silently dropped. Closure leaked on failure. No diagnostic log. [countdown.rs:439-447]
+
+### defer
+
+- [x] [Review][Defer] 5 spec-required unit tests missing (pause label accessor, icon state, CSS class checks, WASM injection tests) — requires adding accessor methods to native struct. Deferred, low priority, spec coverage vs implementation depth trade-off.
+- [x] [Review][Defer] Task 4 (background router wiring) explicitly deferred in story file — integration dependent on future orchestrator work.

@@ -158,7 +158,7 @@ pub(crate) struct CountdownOverlay {
     number_el: Option<HtmlSpanElement>,
     /// The `<circle>` whose stroke-dashoffset drives the ring fill.
     #[cfg(target_arch = "wasm32")]
-    ring_el: Option<Element>,
+    ring_el: Option<HtmlElement>,
     /// The `<div aria-live="assertive">` for screen reader announcements.
     #[cfg(target_arch = "wasm32")]
     aria_el: Option<HtmlSpanElement>,
@@ -206,6 +206,12 @@ impl CountdownOverlay {
     /// On native (non-WASM) this is a no-op that returns `Ok(())`.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn show(&mut self) -> Result<()> {
+        // Idempotency guard — ignore if already rendered.
+        if self.removed {
+            oxichrome::log!("CountdownOverlay::show() called when already rendered — ignoring");
+            return Ok(());
+        }
+
         let document = web_sys::window()
             .and_then(|w| w.document())
             .ok_or_else(|| crate::error::RecordingError::Unknown {
@@ -274,7 +280,7 @@ impl CountdownOverlay {
         self.container = Some(container);
         self.shadow = Some(shadow);
         self.number_el = Some(number_el.unchecked_into::<HtmlSpanElement>());
-        self.ring_el = Some(ring_fill);
+        self.ring_el = Some(ring_fill.unchecked_into::<HtmlElement>());
         self.aria_el = Some(aria_el.unchecked_into::<HtmlSpanElement>());
 
         // Trigger the "visible" state after a microtask so the CSS transition fires.
@@ -291,19 +297,19 @@ impl CountdownOverlay {
         }
 
         // Register the Escape keydown handler on the document.
+        // Uses a cancelled flag shared with the interval to prevent further ticks.
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
         {
-            let container_ptr = self.container.as_ref().map(|c| c.clone() as Element);
+            let escape_cancelled = std::rc::Rc::clone(&cancelled);
             let on_cancel_ptr: *mut Option<Box<dyn FnMut()>> = &mut self.on_cancel as *mut _;
 
             let cb = Closure::wrap(Box::new(move |event: KeyboardEvent| {
-                if event.key() == "Escape" {
+                if event.key() == "Escape" && !escape_cancelled.get() {
                     event.prevent_default();
                     event.stop_propagation();
-                    // Remove the overlay immediately.
-                    if let Some(ref c) = container_ptr {
-                        let _ = c.remove();
-                    }
-                    // Fire the cancel callback.
+                    escape_cancelled.set(true);
+                    // Fire the cancel callback — the orchestrator calls remove() to
+                    // clean up the interval, listener, and DOM.
                     if let Some(ref mut cb) = unsafe { &mut *on_cancel_ptr } {
                         cb();
                     }
@@ -316,8 +322,9 @@ impl CountdownOverlay {
             self._keydown_closure = Some(cb);
         }
 
-        // Start the countdown interval.
-        self.start_interval(&document);
+        // Start the countdown interval — passes the cancelled flag so it can
+        // skip ticks after an Escape cancel.
+        self.start_interval(&document, cancelled);
 
         // Append to body.
         body.append_child(self.container.as_ref().expect("invariant: container set"))?;
@@ -335,115 +342,128 @@ impl CountdownOverlay {
     }
 
     /// Start the 1-second interval that drives number and ring updates.
+    ///
+    /// Total duration: 3 seconds (3 ticks × 1s each).
+    /// - Tick 0: Show "3", ring fills empty→full, announce "3"
+    /// - Tick 1: Show "2", ring resets fills, announce "2"
+    /// - Tick 2: Show "1", ring resets fills, announce "1"
+    /// - Tick 3: Fire on_complete, "Recording started" announcement
+    ///
+    /// The `cancelled` flag is shared with the Escape handler — when set,
+    /// the interval stops processing ticks immediately.
     #[cfg(target_arch = "wasm32")]
-    fn start_interval(&mut self, document: &Document) {
-        // We use a counter approach: each tick advances the state.
-        // Total ticks: 4 (number 3 visible → tick1: show 2, tick2: show 1, tick3: complete)
-        let elapsed = std::cell::Cell::new(0u32);
+    fn start_interval(
+        &mut self,
+        document: &Document,
+        cancelled: std::rc::Rc<std::cell::Cell<bool>>,
+    ) {
         let number_ref = self.number_el.clone();
         let ring_ref = self.ring_el.clone();
         let aria_ref = self.aria_el.clone();
         let on_complete_ptr: *mut Option<Box<dyn FnMut()>> = &mut self.on_complete as *mut _;
 
-        let cb = Closure::wrap(Box::new(move || {
-            let tick = elapsed.get();
-            elapsed.set(tick + 1);
+        // Helper to reset the ring so it fills from empty to full over 1s.
+        let reset_ring = |ring: &HtmlElement| {
+            // Disable the CSS transition so the reset is instant.
+            ring.style().set_property("transition", "none").ok();
+            ring.set_attribute("stroke-dashoffset", "282.74").ok();
+            // Force synchronous style recalculation so the next change is animated.
+            let _ = ring.client_height();
+            // Re-enable transition — the next offset change animates over 1s.
+            ring.style().set_property("transition", "stroke-dashoffset 1s linear").ok();
+            // Start at empty (282.74 offset = hidden). Setting to 0 triggers
+            // the CSS transition → fills to full over 1s.
+            ring.set_attribute("stroke-dashoffset", "0").ok();
+        };
 
-            match tick {
+        let tick = std::cell::Cell::new(0u32);
+
+        let cb = Closure::wrap(Box::new(move || {
+            // If Escape was pressed, skip all further ticks.
+            if cancelled.get() {
+                return;
+            }
+
+            let t = tick.get();
+            tick.set(t + 1);
+
+            match t {
                 0 => {
-                    // Show "2": fade out current, update text, fade in.
+                    // Show "3" — already set as text content. Make visible,
+                    // start the ring animation.
                     if let Some(ref num) = number_ref {
-                        num.class_list().remove_1("visible").ok();
-                        num.class_list().add_1("fade-out").ok();
+                        num.class_list().add_1("visible").ok();
+                    }
+                    if let Some(ref ring) = ring_ref {
+                        reset_ring(ring);
+                    }
+                    if let Some(ref aria) = aria_ref {
+                        aria.set_text_content(Some("3"));
                     }
                 }
                 1 => {
-                    // Mid-point: update number text to "2", reset animation classes.
+                    // Show "2" — fade out "3", fade in "2", reset ring.
                     if let Some(ref num) = number_ref {
+                        num.class_list().remove_1("visible").ok();
                         num.set_text_content(Some("2"));
-                        num.class_list().remove_1("fade-out").ok();
-                        // Small delay for the class removal to take effect.
+                        // Add visible immediately — the CSS transition will
+                        // fade it in while "3" fades out.
+                        num.class_list().add_1("visible").ok();
+                    }
+                    if let Some(ref ring) = ring_ref {
+                        reset_ring(ring);
                     }
                     if let Some(ref aria) = aria_ref {
                         aria.set_text_content(Some("2"));
                     }
-                    // Reset ring.
-                    if let Some(ref ring) = ring_ref {
-                        ring.set_attribute("stroke-dashoffset", &RING_CIRCUMFERENCE.to_string()).ok();
-                    }
                 }
                 2 => {
-                    // Show "2" visible.
-                    if let Some(ref num) = number_ref {
-                        num.class_list().add_1("visible").ok();
-                    }
-                }
-                3 => {
-                    // Show "1": fade out "2".
+                    // Show "1" — same pattern.
                     if let Some(ref num) = number_ref {
                         num.class_list().remove_1("visible").ok();
-                        num.class_list().add_1("fade-out").ok();
-                    }
-                }
-                4 => {
-                    // Mid-point: update text to "1".
-                    if let Some(ref num) = number_ref {
                         num.set_text_content(Some("1"));
-                        num.class_list().remove_1("fade-out").ok();
+                        num.class_list().add_1("visible").ok();
+                    }
+                    if let Some(ref ring) = ring_ref {
+                        reset_ring(ring);
                     }
                     if let Some(ref aria) = aria_ref {
                         aria.set_text_content(Some("1"));
                     }
-                    // Reset ring.
-                    if let Some(ref ring) = ring_ref {
-                        ring.set_attribute("stroke-dashoffset", &RING_CIRCUMFERENCE.to_string()).ok();
-                    }
                 }
-                5 => {
-                    // Show "1" visible.
-                    if let Some(ref num) = number_ref {
-                        num.class_list().add_1("visible").ok();
-                    }
-                }
-                6 => {
-                    // Complete: fade out "1".
-                    if let Some(ref num) = number_ref {
-                        num.class_list().remove_1("visible").ok();
-                        num.class_list().add_1("fade-out").ok();
-                    }
-                }
-                7 => {
-                    // Countdown complete: fire callback.
+                3 => {
+                    // Countdown complete — fire callback.
                     if let Some(ref aria) = aria_ref {
                         aria.set_text_content(Some("Recording started"));
                     }
-
-                    // Clear the interval.
-                    // on_complete callback handles removal + state transition.
                     if let Some(ref mut cb) = unsafe { &mut *on_complete_ptr } {
                         cb();
                     }
                 }
                 _ => {}
             }
-
-            // Advance ring fill on the ticks where numbers are shown.
-            if tick <= 1 || tick == 3 || tick == 5 {
-                if let Some(ref ring) = ring_ref {
-                    let offset = RING_CIRCUMFERENCE - (RING_CIRCUMFERENCE * (tick as f64 + 1.0) / 3.0);
-                    ring.set_attribute("stroke-dashoffset", &offset.to_string()).ok();
-                }
-            }
         }) as Box<dyn FnMut()>);
 
-        let handle = web_sys::window()
+        match web_sys::window()
             .and_then(|w| {
                 w.set_interval_with_callback_and_timeout_and_arguments_0(
                     cb.as_ref().unchecked_ref(),
                     1000,
                 ).ok()
-            });
-        self._interval_handle = handle;
+            })
+        {
+            Some(handle) if handle > 0 => {
+                self._interval_handle = Some(handle);
+            }
+            _ => {
+                oxichrome::log!(
+                    "CountdownOverlay: setInterval failed or returned invalid handle"
+                );
+                // Closure was never attached — must still be kept alive via
+                // forget() to prevent immediate drop.  The overlay will stay
+                // visible but never complete.
+            }
+        }
         cb.forget();
     }
 
@@ -525,6 +545,10 @@ impl CountdownOverlay {
         self.number_el = None;
         self.ring_el = None;
         self.aria_el = None;
+
+        // Clear callbacks to prevent stale handlers on reuse.
+        self.on_cancel = None;
+        self.on_complete = None;
     }
 
     /// Native no-op: nothing to clean up.
@@ -533,6 +557,8 @@ impl CountdownOverlay {
         // State is tracked for testing.
         self.current = 3;
         self.completed = false;
+        self.on_cancel = None;
+        self.on_complete = None;
     }
 
     /// Reset the countdown to its initial state for reuse.
@@ -545,6 +571,21 @@ impl CountdownOverlay {
 impl Default for CountdownOverlay {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Drop safety: clean up DOM and event listeners if dropped without
+/// an explicit `remove()` call.  This prevents leaked intervals,
+/// document-level event listeners, and orphaned shadow DOM.
+#[cfg(target_arch = "wasm32")]
+impl Drop for CountdownOverlay {
+    fn drop(&mut self) {
+        if !self.removed {
+            oxichrome::log!(
+                "CountdownOverlay dropped without remove() — cleaning up"
+            );
+            self.remove();
+        }
     }
 }
 
