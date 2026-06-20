@@ -23,3 +23,12 @@ Tracking items deferred from code reviews that are not yet actionable but should
 - RecordingError `code: String` in ExtensionMessage has no validation (Story 1.3+ when message routing is built)
 - RecordingSession missing serde derives while SessionState has them (add when serialization needed in V0.2+)
 - ApplyStreamingData `data: String` has no format contract (format defined when streaming data module is implemented)
+
+## Deferred from: code review of 1-4-chunk-writer-foundation (2026-06-20)
+
+- `commit_chunk` only commits most recent chunk — By design: single-chunk commit is correct for V0.1 lifecycle.
+- Reserved bytes not validated on decode — Forward-compatible acceptance; a future version may use these bytes.
+- `update_status` allows invalid transitions (Committed→Partial) — In-memory manifest only; crash-recovery concern is acceptable for V0.1.
+- `payload_size` from decoded header not validated — Caller responsibility to validate at read time.
+- `session_id` stored but unused — Will be used in Story 2.1 for OPFS directory naming.
+- Orphaned `.partial` files on rename failure — No cleanup rollback in V0.1; acknowledged as acceptable.

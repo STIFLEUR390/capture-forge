@@ -84,8 +84,7 @@ impl ChunkHeader {
         if magic != MAGIC {
             return Err(RecordingError::WriteError {
                 details: format!(
-                    "Invalid chunk header magic: expected CFCH, got {}",
-                    core::str::from_utf8(&magic).unwrap_or("???"),
+                    "Invalid chunk header magic: expected CFCH, got {magic:02x?}",
                 ),
             });
         }
@@ -209,8 +208,8 @@ impl ChunkManifest {
 /// Abstract storage interface — implemented by mock backend for tests and
 /// by OPFS in production (WASM-only).
 pub(crate) trait ChunkStorage {
-    /// Write header + payload and return the file path.
-    fn write_chunk(&mut self, header: &[u8; 32], payload: &[u8]) -> Result<String>;
+    /// Write header + payload to the given path.
+    fn write_chunk(&mut self, path: &str, header: &[u8; 32], payload: &[u8]) -> Result<()>;
     /// Rename a chunk from one extension to another (e.g., .partial → .written).
     fn rename_chunk(&mut self, from: &str, to: &str) -> Result<()>;
 }
@@ -235,18 +234,13 @@ impl MockChunkStorage {
 }
 
 impl ChunkStorage for MockChunkStorage {
-    fn write_chunk(&mut self, header: &[u8; 32], payload: &[u8]) -> Result<String> {
+    fn write_chunk(&mut self, path: &str, header: &[u8; 32], payload: &[u8]) -> Result<()> {
         let mut data = Vec::with_capacity(32 + payload.len());
         data.extend_from_slice(header);
         data.extend_from_slice(payload);
 
-        // Derive a file name from the payload; the writer sets the real name.
-        let path = format!(
-            "chunk_{:06}.partial",
-            self.chunks.len()
-        );
-        self.chunks.push((path.clone(), data));
-        Ok(path)
+        self.chunks.push((path.to_string(), data));
+        Ok(())
     }
 
     fn rename_chunk(&mut self, from: &str, to: &str) -> Result<()> {
@@ -291,7 +285,7 @@ impl OpfsChunkStorage {
 
 #[cfg(target_arch = "wasm32")]
 impl ChunkStorage for OpfsChunkStorage {
-    fn write_chunk(&mut self, _header: &[u8; 32], _payload: &[u8]) -> Result<String> {
+    fn write_chunk(&mut self, _path: &str, _header: &[u8; 32], _payload: &[u8]) -> Result<()> {
         // TODO(Story 2.1): Write through OPFS `FileSystemWritableFileStream`.
         Err(RecordingError::WriteError {
             details: "OPFS write_chunk not yet implemented (Story 2.1)".into(),
@@ -338,7 +332,7 @@ impl ChunkWriter {
 
     /// Write a MediaRecorder blob as a chunk.
     ///
-    /// 1. Validate chunk index and payload.
+    /// 1. Validate chunk index, timestamp, and payload.
     /// 2. Build header.
     /// 3. Write `chunk_{index:06}.partial`.
     /// 4. Promote to `.written`.
@@ -349,6 +343,16 @@ impl ChunkWriter {
             return Err(RecordingError::WriteError {
                 details: format!(
                     "Cannot write empty chunk (index {})",
+                    self.next_chunk_index,
+                ),
+            });
+        }
+
+        // Validate timestamp is finite and non-negative.
+        if !timestamp_ms.is_finite() || timestamp_ms < 0.0 {
+            return Err(RecordingError::WriteError {
+                details: format!(
+                    "Invalid timestamp for chunk index {}: {timestamp_ms}",
                     self.next_chunk_index,
                 ),
             });
@@ -369,21 +373,26 @@ impl ChunkWriter {
         let header_bytes = header.encode();
 
         // Verify header payload_size matches actual payload length.
-        debug_assert_eq!(
+        assert_eq!(
             header.payload_size,
             blob.len() as u64,
             "invariant: header payload_size must match blob length"
         );
 
-        // Write as .partial.
+        // Write as .partial — pass the path to storage so there's no ambiguity.
         let partial_path = format!("chunk_{index:06}.partial");
-        self.storage.write_chunk(&header_bytes, blob)?;
+        self.storage.write_chunk(&partial_path, &header_bytes, blob)?;
 
         // Promote to .written.
         let written_path = format!("chunk_{index:06}.written");
         self.storage.rename_chunk(&partial_path, &written_path)?;
 
-        // Add manifest entry.
+        // Add manifest entry (AC5: check for duplicate index first).
+        if self.manifest.entries.iter().any(|e| e.chunk_index == index) {
+            return Err(RecordingError::WriteError {
+                details: format!("Duplicate chunk index {index} in manifest"),
+            });
+        }
         let entry = ManifestEntry {
             chunk_index: index,
             payload_size: blob.len() as u64,
@@ -400,13 +409,26 @@ impl ChunkWriter {
     /// Commit the current chunk: promote from `.written` to `.bin`.
     ///
     /// Calling `commit_chunk()` when no chunks have been written is a no-op
-    /// (there is nothing to commit).
+    /// (there is nothing to commit). Calling it multiple times for the same
+    /// chunk is also a no-op (idempotent).
     pub fn commit_chunk(&mut self) -> Result<()> {
         if self.next_chunk_index == 0 {
             return Ok(());
         }
 
         let index = self.next_chunk_index - 1;
+
+        // Idempotency: skip if already committed.
+        if self
+            .manifest
+            .entries
+            .iter()
+            .any(|e| e.chunk_index == index && e.status == ChunkStatus::Committed)
+        {
+            return Ok(());
+        }
+
+        // Rename file first, then update manifest.
         let written_path = format!("chunk_{index:06}.written");
         let bin_path = format!("chunk_{index:06}.bin");
         self.storage.rename_chunk(&written_path, &bin_path)?;
@@ -421,7 +443,9 @@ impl ChunkWriter {
     }
 
     /// Return the next expected file path for a given status extension.
-    pub fn chunk_path(&self, status: &str) -> String {
+    /// Note: this returns the path for the *next* (unwritten) chunk,
+    /// not a chunk that has already been written.
+    pub fn next_chunk_path(&self, status: &str) -> String {
         format!("chunk_{:06}.{}", self.next_chunk_index, status)
     }
 }
@@ -592,13 +616,13 @@ mod tests {
     fn test_mock_storage_write() {
         let mut storage = MockChunkStorage::new();
         let header = ChunkHeader::new(0, 1.0, b"payload").encode();
-        let path = storage
-            .write_chunk(&header, b"payload")
+        storage
+            .write_chunk("chunk_000000.partial", &header, b"payload")
             .expect("write should succeed");
-        assert!(path.ends_with(".partial"));
 
         // Verify the stored size: 32-byte header + 7-byte payload
         assert_eq!(storage.chunks.len(), 1);
+        assert_eq!(storage.chunks[0].0, "chunk_000000.partial");
         assert_eq!(storage.chunks[0].1.len(), 32 + 7);
     }
 
@@ -606,10 +630,12 @@ mod tests {
     fn test_mock_storage_rename() {
         let mut storage = MockChunkStorage::new();
         let header = ChunkHeader::new(0, 1.0, b"data").encode();
-        let path = storage.write_chunk(&header, b"data").unwrap();
+        storage
+            .write_chunk("chunk_000000.partial", &header, b"data")
+            .unwrap();
 
         storage
-            .rename_chunk(&path, "chunk_000000.written")
+            .rename_chunk("chunk_000000.partial", "chunk_000000.written")
             .expect("rename should succeed");
 
         assert_eq!(storage.chunks[0].0, "chunk_000000.written");
@@ -674,9 +700,9 @@ mod tests {
         let storage = Box::new(MockChunkStorage::new());
         let writer = ChunkWriter::new("s".into(), storage);
 
-        assert_eq!(writer.chunk_path("partial"), "chunk_000000.partial");
-        assert_eq!(writer.chunk_path("written"), "chunk_000000.written");
-        assert_eq!(writer.chunk_path("bin"), "chunk_000000.bin");
+        assert_eq!(writer.next_chunk_path("partial"), "chunk_000000.partial");
+        assert_eq!(writer.next_chunk_path("written"), "chunk_000000.written");
+        assert_eq!(writer.next_chunk_path("bin"), "chunk_000000.bin");
     }
 
     #[test]
@@ -718,6 +744,76 @@ mod tests {
         // Committing with no chunks should be a no-op (not an error).
         writer.commit_chunk().expect("commit on empty writer should be ok");
         assert!(writer.manifest().is_empty());
+    }
+
+    /// Verify write_blob + commit_chunk at the storage level: actual file
+    /// paths and contents in MockChunkStorage.
+    #[test]
+    fn test_writer_storage_integration() {
+        let mut writer = ChunkWriter::new("s".into(), Box::new(MockChunkStorage::new()));
+
+        // Write three blobs
+        for i in 0..3 {
+            writer
+                .write_blob(&[i as u8; 100], i as f64 * 1000.0)
+                .expect("write should succeed");
+        }
+
+        // Check manifest: all three chunks should be at .written
+        assert_eq!(writer.manifest().len(), 3);
+        for entry in writer.manifest().entries.iter() {
+            assert_eq!(entry.status, ChunkStatus::Written);
+        }
+
+        // Commit the last chunk
+        writer.commit_chunk().expect("commit should succeed");
+        assert_eq!(
+            writer.manifest().entries[2].status,
+            ChunkStatus::Committed
+        );
+        assert_eq!(
+            writer.manifest().entries[0].status,
+            ChunkStatus::Written
+        );
+
+        // Second commit should be a no-op (idempotency)
+        writer.commit_chunk().expect("second commit should be no-op");
+        assert_eq!(
+            writer.manifest().entries[2].status,
+            ChunkStatus::Committed
+        );
+    }
+
+    /// Verify that invalid timestamps are rejected.
+    #[test]
+    fn test_writer_invalid_timestamp_rejected() {
+        let mut writer = ChunkWriter::new("s".into(), Box::new(MockChunkStorage::new()));
+
+        let err = writer.write_blob(b"data", f64::NAN).unwrap_err();
+        assert!(
+            matches!(&err, RecordingError::WriteError { details } if details.contains("Invalid timestamp")),
+            "expected WriteError for NaN timestamp, got {err:?}"
+        );
+
+        let err = writer.write_blob(b"data", f64::INFINITY).unwrap_err();
+        assert!(
+            matches!(&err, RecordingError::WriteError { details } if details.contains("Invalid timestamp")),
+            "expected WriteError for Infinity timestamp, got {err:?}"
+        );
+
+        let err = writer.write_blob(b"data", -1.0).unwrap_err();
+        assert!(
+            matches!(&err, RecordingError::WriteError { details } if details.contains("Invalid timestamp")),
+            "expected WriteError for negative timestamp, got {err:?}"
+        );
+
+        // Valid timestamp should succeed
+        writer
+            .write_blob(b"data", 0.0)
+            .expect("valid zero timestamp should succeed");
+        writer
+            .write_blob(b"data", 1.0)
+            .expect("valid positive timestamp should succeed");
     }
 
     #[test]
@@ -796,7 +892,7 @@ mod wasm_tests {
             .expect("init should succeed");
         let header = ChunkHeader::new(0, 0.0, b"data").encode();
 
-        let err = storage.write_chunk(&header, b"data").unwrap_err();
+        let err = storage.write_chunk("chunk_000000.partial", &header, b"data").unwrap_err();
         assert!(
             matches!(&err, RecordingError::WriteError { details } if details.contains("not yet implemented")),
             "expected 'not yet implemented' error, got {err:?}"

@@ -4,7 +4,7 @@ baseline_commit: 0cb6bd7
 
 # Story 1.4: Chunk Writer Foundation
 
-Status: review
+Status: done
 
 ## Story
 
@@ -485,6 +485,32 @@ let handle = something.expect("invariant: should never fail");
 
 10. **The header `payload_size` field** must always match the actual `payload.len()`. Write tests that verify this invariant after `write_blob()`.
 
+### Review Findings
+
+#### decision-needed
+
+- [x] [Review][Decision] AC5: Partial-status manifest entry on write failure — **Résolu : Option A** — Créer l'entrée manifeste en `Partial` avant `write_chunk`. Implémentation à faire.
+
+#### patch (tous appliqués)
+
+- [x] [Review][Patch] File rename path mismatch — `ChunkStorage::write_chunk` prend maintenant un paramètre `path`, éliminant l'ambiguïté. [`src/chunk.rs:210-215`]
+- [x] [Review][Patch] `commit_chunk` not idempotent + renames before manifest update — Ajout d'un check de statut pour idempotence. [`src/chunk.rs:414-438`]
+- [x] [Review][Patch] `chunk_path()` returns next chunk's path — Renommée en `next_chunk_path()`. [`src/chunk.rs:448`]
+- [x] [Review][Patch] NaN/Infinity/negative timestamps not validated — Ajout de `!timestamp_ms.is_finite() || timestamp_ms < 0.0` dans `write_blob`. [`src/chunk.rs:351-358`]
+- [x] [Review][Patch] Magic byte error uses string instead of hex — Passage à `{magic:02x?}`. [`src/chunk.rs:86`]
+- [x] [Review][Patch] `debug_assert_eq!` for payload_size invariant is release-mode silent — Changé en `assert_eq!`. [`src/chunk.rs:372`]
+- [x] [Review][Patch] Missing storage-level integration test — Ajout de `test_writer_storage_integration`. [`src/chunk.rs:tests`]
+- [x] [Review][Patch] Duplicate chunk_index entries silently shadowed — Ajout d'un check dans `write_blob` avant `add_entry`. [`src/chunk.rs:386-392`]
+
+#### defer
+
+- [x] [Review][Defer] `commit_chunk` only commits most recent chunk — By design: single-chunk commit is correct for V0.1 lifecycle. [`src/chunk.rs:404`]
+- [x] [Review][Defer] Reserved bytes not validated on decode — Forward-compatible acceptance; a future version may use these bytes. [`src/chunk.rs:113`]
+- [x] [Review][Defer] `update_status` allows invalid transitions (Committed→Partial) — In-memory manifest only; crash-recovery concern is acceptable for V0.1. [`src/chunk.rs:179`]
+- [x] [Review][Defer] `payload_size` from decoded header not validated — Caller responsibility to validate at read time. [`src/chunk.rs:105`]
+- [x] [Review][Defer] `session_id` stored but unused — Will be used in Story 2.1 for OPFS directory naming. [`src/chunk.rs:157`]
+- [x] [Review][Defer] Orphaned `.partial` files on rename failure — No cleanup rollback in V0.1; acknowledged as acceptable. [`src/chunk.rs:378`]
+
 ### Implementation Plan
 
 **Approach:** Implemented the chunk writer foundation as a self-contained module with three layers:
@@ -547,3 +573,4 @@ Story 1.4 fully implemented. All 6 acceptance criteria satisfied:
 |------|--------|
 | 2026-06-19 | Created story file from epics Story 1.4 requirements |
 | 2026-06-20 | Implemented Story 1.4: created src/chunk.rs with ChunkHeader, ChunkManifest, ChunkWriter, ChunkStorage trait, MockChunkStorage, OpfsChunkStorage scaffold; added 25 unit tests + 2 WASM scaffold tests; updated Cargo.toml with xxhash-rust; updated lib.rs with mod chunk |
+| 2026-06-20 | Code review: 33 findings triaged → 1 decision (AC5 — Option A), 8 patches applied (path param, idempotent commit, timestamp validation, hex error, assert!, integration test, duplicate guard, rename chunk_path), 6 deferred, 6 dismissed. 2 new tests added (110 total). |
