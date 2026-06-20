@@ -30,6 +30,18 @@ web-sys = { version = "0.3", features = [
     "Blob",
     "BlobEvent",
     "Event",
+    # Story 1.6 — Countdown & RecorderStatusBar
+    "Document",
+    "Element",
+    "ShadowRoot",
+    "ShadowRootInit",
+    "ShadowRootMode",
+    "KeyboardEvent",
+    "HtmlElement",
+    "HtmlDivElement",
+    "HtmlSpanElement",
+    "Node",
+    "Performance",
 ] }
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"

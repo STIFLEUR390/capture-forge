@@ -46,6 +46,8 @@ pub enum ExtensionMessage {
     KeepalivePing,
     /// Keepalive pong sent from the service worker back to the offscreen doc.
     KeepalivePong,
+    /// Countdown sequence completed; session should transition to Recording.
+    CountdownComplete,
     /// Request current streaming data from the recording module.
     GetStreamingData,
     /// Apply previously-fetched streaming data.
@@ -137,6 +139,11 @@ mod tests {
     }
 
     #[test]
+    fn test_countdown_complete() {
+        roundtrip(&ExtensionMessage::CountdownComplete);
+    }
+
+    #[test]
     fn test_get_streaming_data() {
         roundtrip(&ExtensionMessage::GetStreamingData);
     }
@@ -163,6 +170,7 @@ mod tests {
         assert!(ExtensionMessage::KeepalivePing.is_keepalive());
         assert!(ExtensionMessage::KeepalivePong.is_keepalive());
         assert!(!ExtensionMessage::StopRecording.is_keepalive());
+        assert!(!ExtensionMessage::CountdownComplete.is_keepalive());
         assert!(!ExtensionMessage::StartRecording { mode: RecordingMode::FullScreen }.is_keepalive());
     }
 }

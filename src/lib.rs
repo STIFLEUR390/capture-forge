@@ -1,9 +1,11 @@
 mod chunk;
+mod countdown;
 mod error;
 mod export;
 mod lifecycle;
 mod messaging;
 mod recorder;
+mod status_bar;
 mod stream;
 
 use std::sync::atomic::{AtomicBool, Ordering};
