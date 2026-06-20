@@ -1,17 +1,36 @@
-/target
-/dist
-*.wasm
+# Rust / Cargo
+target/
 Cargo.lock
-/target
-/config.stamp
-/Makefile
-/config.mk
-/src/doc/build
-/src/etc/*.pyc
-/src/registry/target
-rustc
-__pycache__
+
+# WebAssembly build output
+dist/
+*.wasm
+
+# IDE / Editor
 .idea/
 .vscode/
 *.iml
 *.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# BMAD / Project config (user-specific)
+_bmad/config.user.toml
+_bmad/custom/config.user.toml
+config.stamp
+
+# Build artifacts
+**/*.pyc
+__pycache__/
+/src/doc/build
+/src/etc/*.pyc
+/src/registry/target
+rustc
+
+# Makefile artifacts (if any)
+/Makefile
+/config.mk
