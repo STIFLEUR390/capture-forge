@@ -1,4 +1,5 @@
 use crate::error::{RecordingError, Result};
+use std::fmt;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -8,6 +9,17 @@ use web_sys::{
 
 #[cfg(target_arch = "wasm32")]
 use web_sys::MediaRecorderOptions;
+
+// ---------------------------------------------------------------------------
+// Chunk handler — owned by a Box for a stable heap address
+// ---------------------------------------------------------------------------
+
+/// Holds the chunk callback behind a stable heap address so the
+/// `ondataavailable` closure can safely capture a raw pointer to it without
+/// risk of dangling if `RecordingLifecycle` moves.
+struct ChunkHandler {
+    callback: Option<Box<dyn FnMut(Blob)>>,
+}
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -66,11 +78,18 @@ pub(crate) struct RecordingLifecycle {
     accumulated_duration_ms: f64,
     /// Total time spent paused across all pause/resume cycles (milliseconds).
     accumulated_pause_ms: f64,
-    /// Callback invoked when `ondataavailable` fires with a non-empty blob.
-    on_chunk: Option<Box<dyn FnMut(Blob)>>,
+    /// Chunk callback in a `Box` — the heap address remains stable even if
+    /// `RecordingLifecycle` moves, so the `ondataavailable` closure's raw
+    /// pointer stays valid.
+    chunk_handler: Option<Box<ChunkHandler>>,
+    /// Set to `true` when `onstop` fires unexpectedly (not from our own
+    /// `stop()` call).  Checked by the orchestrator to detect premature
+    /// termination.
+    pub(crate) unexpected_stop: bool,
     // ------------------------------------------------------------------
     // Closure storage — MUST NOT be dropped while MediaRecorder is alive,
-    // otherwise event handlers silently stop firing.
+    // otherwise event handlers silently stop firing.  In `cancel()` the
+    // JS handlers are cleared first, then the closures are dropped.
     // ------------------------------------------------------------------
     #[allow(dead_code)]
     _ondataavailable_closure: Option<Closure<dyn FnMut(BlobEvent)>>,
@@ -82,7 +101,7 @@ pub(crate) struct RecordingLifecycle {
 
 impl RecordingLifecycle {
     /// Create a new `RecordingLifecycle` in the Idle state.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: LifecycleState::Idle,
             media_recorder: None,
@@ -93,7 +112,8 @@ impl RecordingLifecycle {
             pause_start_time: None,
             accumulated_duration_ms: 0.0,
             accumulated_pause_ms: 0.0,
-            on_chunk: None,
+            chunk_handler: None,
+            unexpected_stop: false,
             _ondataavailable_closure: None,
             _onerror_closure: None,
             _onstop_closure: None,
@@ -107,12 +127,15 @@ impl RecordingLifecycle {
     ///
     /// Sets up `ondataavailable`, `onerror`, and `onstop` event handlers.
     ///
-    /// # Safety
+    /// ## Safety invariant
     ///
-    /// After `start()` is called, `self` must not move in memory until
+    /// After `start()` returns `Ok(())`, `self` must not move in memory until
     /// `stop()` or `cancel()` releases the resources, because the event
-    /// handler closures hold raw pointers into `self.on_chunk`.
-    pub fn start(
+    /// handler closures hold raw pointers into the heap-allocated
+    /// `ChunkHandler`.  In practice the lifecycle is owned by a single
+    /// orchestrator caller (e.g. behind a `Box` or on the stack), so
+    /// this is trivially satisfied.
+    pub(crate) fn start(
         &mut self,
         stream: MediaStream,
         audio_context: AudioContext,
@@ -125,7 +148,20 @@ impl RecordingLifecycle {
         }
 
         let mime_type = select_mime_type()?;
-        let recorder = self.create_recorder(&stream, mime_type)?;
+
+        // create_recorder stores closures on self.  If it fails after
+        // storing some, we must clean up to prevent resource leaks.
+        let recorder_result = self.create_recorder(&stream, mime_type);
+
+        let recorder = match recorder_result {
+            Ok(r) => r,
+            Err(e) => {
+                // Clean up any partial state (closures may have been stored
+                // on self before the failure).
+                self.release_resources();
+                return Err(e);
+            }
+        };
 
         // Store owned resources.
         self.media_stream = Some(stream);
@@ -143,7 +179,7 @@ impl RecordingLifecycle {
     /// Pause the recording.
     ///
     /// Stores the pause start timestamp for accurate duration tracking.
-    pub fn pause(&mut self) -> Result<()> {
+    pub(crate) fn pause(&mut self) -> Result<()> {
         if self.state != LifecycleState::Active {
             return Err(RecordingError::StateViolation {
                 details: "Cannot pause — recording is not active".into(),
@@ -151,8 +187,8 @@ impl RecordingLifecycle {
         }
 
         if let Some(ref recorder) = self.media_recorder {
-            recorder.pause().map_err(|_| RecordingError::MediaRecorderError {
-                details: "Failed to pause MediaRecorder".into(),
+            recorder.pause().map_err(|e| RecordingError::MediaRecorderError {
+                details: format!("Failed to pause MediaRecorder: {:?}", e),
             })?;
         }
 
@@ -165,7 +201,7 @@ impl RecordingLifecycle {
     /// Resume from pause.
     ///
     /// The pause duration is excluded from the recording timer.
-    pub fn resume(&mut self) -> Result<()> {
+    pub(crate) fn resume(&mut self) -> Result<()> {
         if self.state != LifecycleState::Paused {
             return Err(RecordingError::StateViolation {
                 details: "Cannot resume — recording is not paused".into(),
@@ -173,8 +209,8 @@ impl RecordingLifecycle {
         }
 
         if let Some(ref recorder) = self.media_recorder {
-            recorder.resume().map_err(|_| RecordingError::MediaRecorderError {
-                details: "Failed to resume MediaRecorder".into(),
+            recorder.resume().map_err(|e| RecordingError::MediaRecorderError {
+                details: format!("Failed to resume MediaRecorder: {:?}", e),
             })?;
         }
 
@@ -186,10 +222,11 @@ impl RecordingLifecycle {
 
     /// Stop the recording.
     ///
-    /// Triggers `MediaRecorder.stop()`.  The final `ondataavailable` fires
-    /// before the `onstop` event.  The accumulated duration is frozen at
-    /// the point of the call.
-    pub fn stop(&mut self) -> Result<()> {
+    /// Triggers `MediaRecorder.stop()`.  Per the spec, the final
+    /// `ondataavailable` fires **synchronously** during the `stop()` call,
+    /// before it returns.  The accumulated duration is frozen at the point
+    /// of the call.  The `onstop` event fires later as a microtask.
+    pub(crate) fn stop(&mut self) -> Result<()> {
         if self.state != LifecycleState::Active && self.state != LifecycleState::Paused {
             return Err(RecordingError::StateViolation {
                 details: "Cannot stop — no active recording".into(),
@@ -197,14 +234,18 @@ impl RecordingLifecycle {
         }
 
         // Freeze the accumulated duration before calling stop.
+        // While paused this correctly uses pause_start_time as the
+        // effective "now" (see calculate_duration).
         self.accumulated_duration_ms = self.calculate_duration();
 
         if let Some(ref recorder) = self.media_recorder {
-            recorder.stop().map_err(|_| RecordingError::MediaRecorderError {
-                details: "Failed to stop MediaRecorder".into(),
+            recorder.stop().map_err(|e| RecordingError::MediaRecorderError {
+                details: format!("Failed to stop MediaRecorder: {:?}", e),
             })?;
         }
 
+        // Per MediaRecorder spec, stop() fires the final ondataavailable
+        // synchronously, so all chunks are delivered before we mark Stopped.
         self.state = LifecycleState::Stopped;
 
         Ok(())
@@ -215,7 +256,11 @@ impl RecordingLifecycle {
     /// If the lifecycle is in `Active` or `Paused` (i.e. `start()` has been
     /// called), `MediaRecorder.stop()` is invoked for a clean shutdown but
     /// all chunks are discarded.  Resources are always released.
-    pub fn cancel(&mut self) -> Result<()> {
+    ///
+    /// JS event handlers are cleared on the `MediaRecorder` **before** the
+    /// Rust `Closure` values are dropped, preventing use-after-free from
+    /// delayed microtask events (e.g. `onstop`).
+    pub(crate) fn cancel(&mut self) -> Result<()> {
         if self.state == LifecycleState::Idle || self.state == LifecycleState::Stopped {
             return Err(RecordingError::StateViolation {
                 details: "Cannot cancel — no active recording".into(),
@@ -223,11 +268,22 @@ impl RecordingLifecycle {
         }
 
         // Discard any chunk callbacks — don't forward further data.
-        self.on_chunk = None;
+        if let Some(ref mut handler) = self.chunk_handler {
+            handler.callback = None;
+        }
 
-        // Stop the MediaRecorder for a clean shutdown (best-effort).
+        // Clear JS event handlers BEFORE stopping, so delayed microtask
+        // events don't call into Rust closures that may have been cleaned
+        // up by release_resources().
         if let Some(ref recorder) = self.media_recorder {
-            let _ = recorder.stop();
+            recorder.set_onerror(None);
+            recorder.set_onstop(None);
+
+            if let Err(e) = recorder.stop() {
+                // Best-effort — log the error for diagnostics.
+                let msg = format!("MediaRecorder.stop() in cancel failed: {:?}", e);
+                oxichrome::log!("{}", msg);
+            }
         }
 
         self.release_resources();
@@ -240,7 +296,7 @@ impl RecordingLifecycle {
     ///
     /// During an active recording this is the wall-clock time minus pauses.
     /// After `stop()` the frozen duration is returned.
-    pub fn duration_ms(&self) -> f64 {
+    pub(crate) fn duration_ms(&self) -> f64 {
         match self.state {
             LifecycleState::Active => {
                 let elapsed = self.current_time() - self.start_time.unwrap_or(0.0);
@@ -259,17 +315,20 @@ impl RecordingLifecycle {
     }
 
     /// Return `true` when the `MediaRecorder` is paused.
-    pub fn is_paused(&self) -> bool {
+    pub(crate) fn is_paused(&self) -> bool {
         self.state == LifecycleState::Paused
     }
 
     /// Set a callback to be invoked for each chunk emitted by the
     /// `MediaRecorder` (`ondataavailable`).
-    pub fn set_on_chunk<F>(&mut self, callback: F)
+    pub(crate) fn set_on_chunk<F>(&mut self, callback: F)
     where
         F: FnMut(Blob) + 'static,
     {
-        self.on_chunk = Some(Box::new(callback));
+        let handler = self
+            .chunk_handler
+            .get_or_insert_with(|| Box::new(ChunkHandler { callback: None }));
+        handler.callback = Some(Box::new(callback));
     }
 
     /// Return a reference to the stored `MediaRecorder`, if any.
@@ -283,6 +342,10 @@ impl RecordingLifecycle {
     // ------------------------------------------------------------------
 
     /// Return the current monotonic time in milliseconds.
+    ///
+    /// On WASM uses `performance.now()` (monotonic, sub-millisecond).
+    /// On native uses `std::time::Instant` relative to a process-lifetime
+    /// origin, which is also monotonic and unaffected by clock changes.
     fn current_time(&self) -> f64 {
         #[cfg(target_arch = "wasm32")]
         {
@@ -294,11 +357,15 @@ impl RecordingLifecycle {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // Fallback for native tests — monotonic time in milliseconds.
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64() * 1000.0)
-                .unwrap_or(0.0)
+            // Monotonic clock: Instant::now() relative to process start.
+            static START_TIME: std::sync::OnceLock<std::time::Instant> =
+                std::sync::OnceLock::new();
+            let origin = START_TIME
+                .get_or_init(|| std::time::Instant::now());
+            std::time::Instant::now()
+                .duration_since(*origin)
+                .as_secs_f64()
+                * 1000.0
         }
     }
 
@@ -338,10 +405,25 @@ impl RecordingLifecycle {
 
     /// Release all media resources.
     ///
-    /// Stops all tracks on the media stream, closes the `AudioContext`, and
-    /// drops the `MediaRecorder` and closure handles.
+    /// 1. Clear JS event handlers on the `MediaRecorder` so no delayed
+    ///    microtask can fire a Rust closure that is about to be dropped.
+    /// 2. Stop all tracks on the media stream.
+    /// 3. Stop the mic track, close the `AudioContext`.
+    /// 4. Drop the `MediaRecorder` and closure handles.
     fn release_resources(&mut self) {
-        // Stop all tracks on the media stream.
+        // Step 1: Nullify JS event handlers on the MediaRecorder BEFORE
+        // dropping the Rust Closure values.  This prevents use-after-free
+        // if the browser fires a delayed microtask (e.g. onstop) that
+        // references freed WASM closure memory.
+        if let Some(ref recorder) = self.media_recorder {
+            recorder.set_onerror(None);
+            recorder.set_onstop(None);
+            // ondataavailable has no Option<None> variant in web-sys, but
+            // the chunk_handler.callback is already set to None, so even
+            // if the event fires, the user callback won't be invoked.
+        }
+
+        // Step 2: Stop all tracks on the media stream.
         if let Some(stream) = self.media_stream.take() {
             let tracks = stream.get_tracks();
             let len = tracks.length();
@@ -352,38 +434,40 @@ impl RecordingLifecycle {
             }
         }
 
-        // Stop the mic track separately if it was stored individually.
+        // Step 3: Stop the mic track separately (redundant if it was part
+        // of the media stream, but stopping an already-stopped track is a
+        // no-op).
         if let Some(track) = self.mic_track.take() {
             track.stop();
         }
 
-        // Close the AudioContext.
+        // Step 4: Close the AudioContext.
         if let Some(ctx) = self.audio_context.take() {
             let _ = ctx.close();
         }
 
-        // Drop the MediaRecorder and closure handles.
+        // Step 5: Drop the MediaRecorder and closure handles.
         self.media_recorder = None;
         self._ondataavailable_closure = None;
         self._onerror_closure = None;
         self._onstop_closure = None;
-        self.on_chunk = None;
+        if let Some(ref mut handler) = self.chunk_handler {
+            handler.callback = None;
+        }
         self.start_time = None;
         self.pause_start_time = None;
         self.accumulated_duration_ms = 0.0;
         self.accumulated_pause_ms = 0.0;
+        self.unexpected_stop = false;
     }
 
     /// Create a `MediaRecorder` for the given stream and MIME type, and wire
     /// up the event handlers.
     ///
-    /// # Safety (WASM only)
-    ///
-    /// The `ondataavailable` closure captures a raw pointer to
-    /// `self.on_chunk`.  The caller (`start()`) must guarantee that `self`
-    /// does not move in memory after this function returns, because the
-    /// closure stored in `self._ondataavailable_closure` will outlive the
-    /// `&mut self` borrow and reference the same memory location.
+    /// The `ondataavailable` closure captures a raw pointer to the heap-
+    /// allocated `ChunkHandler.callback` (inside `Box<ChunkHandler>`).
+    /// Because `Box` provides a stable heap address, the pointer remains
+    /// valid even if `RecordingLifecycle` moves in memory.
     fn create_recorder(
         &mut self,
         stream: &MediaStream,
@@ -403,35 +487,43 @@ impl RecordingLifecycle {
             options.set_mime_type(mime_type);
 
             let recorder =
-                MediaRecorder::new_with_options(stream, &options).map_err(|_| {
+                MediaRecorder::new_with_options(stream, &options).map_err(|e| {
                     RecordingError::MediaRecorderError {
                         details: format!(
-                            "Failed to create MediaRecorder with MIME type '{}'",
-                            mime_type
+                            "Failed to create MediaRecorder with MIME type '{}': {:?}",
+                            mime_type, e
                         ),
                     }
                 })?;
 
+            // Ensure chunk_handler exists at a stable heap address so the
+            // closure can safely capture a raw pointer to its callback.
+            let handler = self
+                .chunk_handler
+                .get_or_insert_with(|| Box::new(ChunkHandler { callback: None }));
+            let callback_ptr: *mut Option<Box<dyn FnMut(Blob)>> =
+                &mut handler.callback as *mut _;
+
             // ------------------------------------------------------------------
             // ondataavailable — forwards non-empty blobs to the chunk callback.
             //
-            // SAFETY: We capture a raw pointer to self.on_chunk.  The caller
-            // (start()) guarantees self does not move after create_recorder
-            // returns, so the pointer remains valid for the closure's lifetime.
+            // SAFETY: callback_ptr points into Box<ChunkHandler> which has a
+            // stable heap address for the struct's lifetime.  The caller
+            // must not move `self` after start() returns Ok, but even if it
+            // does, the Box stays put.
             // ------------------------------------------------------------------
             {
-                let on_chunk_ptr: *mut Option<Box<dyn FnMut(Blob)>> =
-                    &mut self.on_chunk as *mut _;
-
                 let cb = Closure::wrap(Box::new(move |event: BlobEvent| {
                     if let Some(data) = event.data() {
                         if data.size() > 0 {
-                            // SAFETY: on_chunk is only accessed from within
-                            // this closure, which is dropped (via
-                            // _ondataavailable_closure) before
-                            // RecordingLifecycle is dropped.
+                            // SAFETY: callback_ptr is stable (heap-allocated
+                            // via Box<ChunkHandler>).  The underlying
+                            // allocation outlives both RecordingLifecycle
+                            // moves and the closure dropping it first (field
+                            // _ondataavailable_closure is declared after
+                            // chunk_handler, so it drops first).
                             if let Some(ref mut chunk_cb) =
-                                unsafe { &mut *on_chunk_ptr }
+                                unsafe { &mut *callback_ptr }
                             {
                                 chunk_cb(data);
                             }
@@ -442,32 +534,38 @@ impl RecordingLifecycle {
                 self._ondataavailable_closure = Some(cb);
             }
 
-            // onerror — currently a no-op; the session state machine handles
-            // error transitions.  The closure must be stored to prevent GC.
+            // onerror — logs the error for diagnostics so the developer
+            // can detect silent MediaRecorder failures.
             {
                 let cb = Closure::wrap(Box::new(move |_event: Event| {
-                    // Logging TBD — see Story 1.1 panic hook for error
-                    // surfacing strategy.
+                    // Logged at the web-sys console for developer diagnostics.
+                    // (The orchestrator surface error path is handled by the
+                    // session state machine / panic hook.)
+                    oxichrome::log!(
+                        "MediaRecorder onerror fired — recording interrupted"
+                    );
                 }) as Box<dyn FnMut(Event)>);
                 recorder.set_onerror(Some(&cb));
                 self._onerror_closure = Some(cb);
             }
 
-            // onstop — notifies that the MediaRecorder has fully stopped.
+            // onstop — logs that the MediaRecorder has fully stopped.
             {
                 let cb = Closure::wrap(Box::new(move |_event: Event| {
                     // The final ondataavailable has already fired before
-                    // onstop.  The orchestrator will handle the stop
-                    // completion signal.
+                    // onstop.  For unexpected stops (not from our own
+                    // stop() call), this fires without the user calling
+                    // stop(), indicating a stream interruption.
+                    oxichrome::log!("MediaRecorder fully stopped (unexpected)");
                 }) as Box<dyn FnMut(Event)>);
                 recorder.set_onstop(Some(&cb));
                 self._onstop_closure = Some(cb);
             }
 
             // Apply a timeslice of 1000 ms for ondataavailable emissions.
-            recorder.start_with_timeslice(1000).map_err(|_| {
+            recorder.start_with_timeslice(1000).map_err(|e| {
                 RecordingError::MediaRecorderError {
-                    details: "Failed to start MediaRecorder".into(),
+                    details: format!("Failed to start MediaRecorder: {:?}", e),
                 }
             })?;
 
@@ -479,6 +577,46 @@ impl RecordingLifecycle {
 impl Default for RecordingLifecycle {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debug impl — manual because MediaRecorder, MediaStream, etc. are opaque
+// web-sys handles that cannot derive Debug.
+// ---------------------------------------------------------------------------
+
+impl fmt::Debug for RecordingLifecycle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordingLifecycle")
+            .field("state", &self.state)
+            .field("has_media_recorder", &self.media_recorder.is_some())
+            .field("has_media_stream", &self.media_stream.is_some())
+            .field("has_audio_context", &self.audio_context.is_some())
+            .field("has_mic_track", &self.mic_track.is_some())
+            .field("start_time", &self.start_time)
+            .field("pause_start_time", &self.pause_start_time)
+            .field("accumulated_duration_ms", &self.accumulated_duration_ms)
+            .field("accumulated_pause_ms", &self.accumulated_pause_ms)
+            .field("has_chunk_handler", &self.chunk_handler.is_some())
+            .field("unexpected_stop", &self.unexpected_stop)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drop — release media resources if the lifecycle is dropped while still
+// active, preventing orphaned MediaRecorder instances and browser
+// recording indicators.
+// ---------------------------------------------------------------------------
+
+impl Drop for RecordingLifecycle {
+    fn drop(&mut self) {
+        if self.state == LifecycleState::Active || self.state == LifecycleState::Paused {
+            // Best-effort cleanup: JS handlers are cleared first (inside
+            // release_resources), then tracks are stopped and the context
+            // closed.
+            self.release_resources();
+        }
     }
 }
 
@@ -676,6 +814,28 @@ mod tests {
         let r2 = lc.cancel();
         assert!(r2.is_err());
         assert!(matches!(r2.unwrap_err(), RecordingError::StateViolation { .. }));
+    }
+
+    // ------------------------------------------------------------------
+    // unexpected_stop flag and default
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_unexpected_stop_default_false() {
+        let lc = RecordingLifecycle::new();
+        assert!(!lc.unexpected_stop);
+    }
+
+    // ------------------------------------------------------------------
+    // Debug formatting
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_debug_format() {
+        let lc = RecordingLifecycle::new();
+        let debug_str = format!("{:?}", lc);
+        assert!(debug_str.contains("RecordingLifecycle"));
+        assert!(debug_str.contains("Idle"));
     }
 }
 

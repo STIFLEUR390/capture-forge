@@ -46,7 +46,7 @@ development_status:
   epic-1: in-progress
   1-1-error-system-state-machine-foundation: done
   1-2-stream-acquisition-screen-tab-mic: done
-  1-3-recording-lifecycle-start-stop-pause-resume-cancel: review
+  1-3-recording-lifecycle-start-stop-pause-resume-cancel: done
   1-4-chunk-writer-foundation: backlog
   1-5-webm-export-pipeline: backlog
   1-6-countdown-recorder-status-bar: backlog
