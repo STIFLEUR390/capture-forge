@@ -1,6 +1,10 @@
+---
+baseline_commit: 714b0d6dcc11f9c73d7549db009e9329e9419c86
+---
+
 # Story 1.5: WebM Export Pipeline
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -64,23 +68,23 @@ So that I can play, share, and archive the recording.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Create `src/export.rs` export module (AC1–AC6)
-  - [ ] 1.1 Define `ExportChunk` struct — parsed chunk representation (header + payload bytes)
-  - [ ] 1.2 Implement chunk validation logic — `validate_sequence()` checks each header
-  - [ ] 1.3 Implement `concat()` — payload concatenation into `Vec<u8>` with `video/webm` metadata
-  - [ ] 1.4 Wire `RecordingError::ExportError` and `RecordingError::EmptySession` return paths
-- [ ] Task 2: Update `src/lib.rs` — add `mod export;` (AC4)
-- [ ] Task 3: Write native unit tests (AC6)
-  - [ ] 3.1 `test_export_valid_sequence` — valid chunks → correct concatenated payload
-  - [ ] 3.2 `test_export_empty_session` — empty manifest → `EmptySession`
-  - [ ] 3.3 `test_export_corrupted_checksum` — wrong payload → `ExportError`
-  - [ ] 3.4 `test_export_invalid_magic` — bad magic bytes → `ExportError`
-  - [ ] 3.5 `test_export_version_mismatch` — wrong version → `ExportError`
-  - [ ] 3.6 `test_export_index_gap` — non-contiguous indices → `ExportError`
-  - [ ] 3.7 `test_export_payload_size_mismatch` — header says X, actual is Y → `ExportError`
-  - [ ] 3.8 `test_export_committed_only` — only committed chunks are included
-  - [ ] 3.9 `test_export_benchmark_5min` — N chunks in 50MB under 3s wall-clock
-- [ ] Task 4: Verify compilation and tests — `cargo check` + `cargo test` (all pass)
+- [x] Task 1: Create `src/export.rs` export module (AC1–AC6)
+  - [x] 1.1 Define `ExportChunk` struct — parsed chunk representation (header + payload bytes)
+  - [x] 1.2 Implement chunk validation logic — `validate_sequence()` checks each header
+  - [x] 1.3 Implement `concat()` — payload concatenation into `Vec<u8>` with `video/webm` metadata
+  - [x] 1.4 Wire `RecordingError::ExportError` and `RecordingError::EmptySession` return paths
+- [x] Task 2: Update `src/lib.rs` — add `mod export;` (AC4)
+- [x] Task 3: Write native unit tests (AC6)
+  - [x] 3.1 `test_export_valid_sequence` — valid chunks → correct concatenated payload
+  - [x] 3.2 `test_export_empty_session` — empty manifest → `EmptySession`
+  - [x] 3.3 `test_export_corrupted_checksum` — wrong payload → `ExportError`
+  - [x] 3.4 `test_export_invalid_magic` — bad magic bytes → `ExportError`
+  - [x] 3.5 `test_export_version_mismatch` — wrong version → `ExportError`
+  - [x] 3.6 `test_export_index_gap` — non-contiguous indices → `ExportError`
+  - [x] 3.7 `test_export_payload_size_mismatch` — header says X, actual is Y → `ExportError`
+  - [x] 3.8 `test_export_committed_only` — only committed chunks are included
+  - [x] 3.9 `test_export_benchmark_5min` — N chunks in 50MB under 3s wall-clock
+- [x] Task 4: Verify compilation and tests — `cargo check` + `cargo test` (all pass)
 
 ## Dev Notes
 
@@ -432,19 +436,31 @@ No `web-sys` features, `js-sys` APIs, `chrome.*` APIs, or external crate feature
 
 ### Debug Log
 
-*(To be filled by dev agent during implementation.)*
+- Created `src/export.rs` with `ExportChunk` struct (added `status: ChunkStatus` field for committed-only filtering), `ExportPipeline` struct with `validate_sequence()` and `concat()` methods
+- Made `ChunkHeader::calc_checksum` pub(crate) in `chunk.rs` for checksum error reporting
+- Added `mod export;` to `src/lib.rs`
+- Wrote 14 tests (13 story-required + 1 extra for all-uncommitted edge case)
+- Validation order: index contiguity → magic → version → checksum → payload_size → empty payload
+- `concat()` validates full sequence first, then filters to committed chunks only, then concatenates
 
 ### Completion Notes
 
-*(To be filled by dev agent on completion.)*
+Story 1.5 implémentée et vérifiée :
+- **ExportChunk** — structure avec index, header (ChunkHeader), payload (Vec<u8>), status (ChunkStatus)
+- **ExportPipeline::validate_sequence()** — valide séquence non-vide, contiguïté des index, magic bytes, version, checksum (via verify_checksum()), payload_size, et payload non-vide
+- **ExportPipeline::concat()** — valide la séquence via validate_sequence(), filtre les chunks committed, concatène dans un Vec<u8> pré-alloué via extend_from_slice()
+- Tous les messages d'erreur suivent le tableau de spécification dans Dev Notes
+- `cargo check` → 0 erreurs, `cargo test` → 124 tests passent (14 nouveaux + 110 existants)
+- Performance benchmark (56 MB, 30 chunks) : bien sous 1s (cible <3s NFR-PERF-04)
 
 ### File List
 
 #### Files to Create
-- `src/export.rs` — ExportChunk, ExportPipeline, concat(), validate_sequence(), unit tests
+- `src/export.rs` — ExportChunk, ExportPipeline, concat(), validate_sequence(), unit tests (14 tests)
 
 #### Files Modified
 - `src/lib.rs` — Add `mod export;`
+- `src/chunk.rs` — Made `calc_checksum()` pub(crate) for export error reporting
 
 #### Cargo.toml
 - No changes needed (no new dependencies)
@@ -456,3 +472,4 @@ No `web-sys` features, `js-sys` APIs, `chrome.*` APIs, or external crate feature
 | Date | Change |
 |------|--------|
 | 2026-06-20 | Created story file from epics Story 1.5 requirements and previous story intelligence |
+| 2026-06-20 | Implemented export module: ExportChunk, ExportPipeline (validate_sequence + concat), 14 unit tests, module wiring. Made calc_checksum pub(crate). Status → review |

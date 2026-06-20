@@ -132,7 +132,7 @@ impl ChunkHeader {
     /// Recalculate the XXH3 checksum for a payload.
     ///
     /// `xxh3_64` returns a `u64`; we take the lower 32 bits.
-    fn calc_checksum(payload: &[u8]) -> u32 {
+    pub(crate) fn calc_checksum(payload: &[u8]) -> u32 {
         (xxh3_64(payload) & 0xFFFF_FFFF) as u32
     }
 }

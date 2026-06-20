@@ -1,5 +1,6 @@
 mod chunk;
 mod error;
+mod export;
 mod lifecycle;
 mod messaging;
 mod recorder;
