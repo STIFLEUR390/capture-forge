@@ -48,12 +48,31 @@ impl ExportPipeline {
         for (i, chunk) in chunks.iter().enumerate() {
             let expected_idx = i as u32;
 
-            // Index contiguity.
+            // Index contiguity. Differentiate gap vs duplicate.
             if chunk.index != expected_idx {
+                if chunk.index < expected_idx {
+                    // Duplicate or out-of-order.
+                    return Err(RecordingError::ExportError {
+                        details: format!(
+                            "Chunk sequence error: index {} already appeared (duplicate or out-of-order)",
+                            chunk.index,
+                        ),
+                    });
+                }
                 return Err(RecordingError::ExportError {
                     details: format!(
                         "Chunk sequence gap: expected index {}, got {}",
                         expected_idx, chunk.index,
+                    ),
+                });
+            }
+
+            // Cross-validate ExportChunk.index against header.chunk_index.
+            if chunk.index != chunk.header.chunk_index {
+                return Err(RecordingError::ExportError {
+                    details: format!(
+                        "Chunk {}: header index {} differs from export index {}",
+                        expected_idx, chunk.header.chunk_index, chunk.index,
                     ),
                 });
             }
@@ -78,13 +97,13 @@ impl ExportPipeline {
                 });
             }
 
-            // Checksum validation.
-            if !chunk.header.verify_checksum(&chunk.payload) {
-                let actual = ChunkHeader::calc_checksum(&chunk.payload);
+            // Checksum validation — compute once, compare once.
+            let computed_checksum = ChunkHeader::calc_checksum(&chunk.payload);
+            if chunk.header.checksum != computed_checksum {
                 return Err(RecordingError::ExportError {
                     details: format!(
                         "Chunk {}: checksum mismatch (expected {}, got {})",
-                        expected_idx, chunk.header.checksum, actual,
+                        expected_idx, chunk.header.checksum, computed_checksum,
                     ),
                 });
             }
@@ -323,6 +342,24 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Duplicate index
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_export_duplicate_index() {
+        let chunks = vec![
+            make_valid_chunk(0, b"AAA"),
+            make_valid_chunk(0, b"BBB"), // duplicate index 0
+        ];
+
+        let err = ExportPipeline::concat(&chunks).unwrap_err();
+        assert!(
+            matches!(&err, RecordingError::ExportError { details } if details.contains("duplicate")),
+            "expected ExportError for duplicate index, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Payload size mismatch
     // -----------------------------------------------------------------------
 
@@ -435,7 +472,7 @@ mod tests {
     fn test_export_single_chunk() {
         let chunks = vec![make_valid_chunk(0, b"single chunk payload")];
         let result = ExportPipeline::concat(&chunks).expect("concat should succeed");
-        assert_eq!(result, b"single chunk payload");
+        assert_eq!(&b"single chunk payload"[..], &result[..]);
     }
 
     // -----------------------------------------------------------------------

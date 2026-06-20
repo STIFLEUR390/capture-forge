@@ -4,7 +4,7 @@ baseline_commit: 714b0d6dcc11f9c73d7549db009e9329e9419c86
 
 # Story 1.5: WebM Export Pipeline
 
-Status: review
+Status: done
 
 ## Story
 
@@ -473,3 +473,21 @@ Story 1.5 implémentée et vérifiée :
 |------|--------|
 | 2026-06-20 | Created story file from epics Story 1.5 requirements and previous story intelligence |
 | 2026-06-20 | Implemented export module: ExportChunk, ExportPipeline (validate_sequence + concat), 14 unit tests, module wiring. Made calc_checksum pub(crate). Status → review |
+| 2026-06-20 | Code review: 4 patches applied (index cross-validation, single checksum calc, duplicate detection, assertion order), 3 deferred, 11 dismissed. Status → done |
+
+---
+
+## Review Findings (Code Review — 2026-06-20)
+
+### Patch
+
+- [x] [Review][Patch] Cross-validate `ExportChunk.index` against `header.chunk_index` [src/export.rs:52] — validate_sequence() checks position-level index but never verifies that ExportChunk.index matches the embedded ChunkHeader.chunk_index field.
+- [x] [Review][Patch] Compute checksum once instead of twice on mismatch [src/export.rs:82] — verify_checksum() already computes xxh3 internally, then calc_checksum() recomputes it on failure. Replace both with a single manual calc + comparison.
+- [x] [Review][Patch] Improve error message for duplicate chunk indices [src/export.rs:55] — A duplicate index [0, 0, 1] produces misleading "gap" error instead of describing the duplication.
+- [x] [Review][Patch] Fix assertion order in test [src/export.rs:438] — `assert_eq!(result, expected)` violates project convention; expected value must come first.
+
+### Deferred
+
+- [x] [Review][Defer] `i as u32` truncation on 64-bit platforms [src/export.rs:48] — MAX_CHUNK_INDEX = 999,999 prevents u32 overflow in practice. Deferred, pre-existing architecture constraint.
+- [x] [Review][Defer] `usize` overflow in `total_size` sum on 32-bit WASM [src/export.rs:131] — Real recordings <2GB in WASM memory. Allocation would fail gracefully first. Deferred, pre-existing architecture constraint.
+- [x] [Review][Defer] Benchmark in unit tests rather than `#[bench]` [src/export.rs:tests] — `#[bench]` is unstable and criterion is not available. Acceptable as `#[test]` for V0.1.

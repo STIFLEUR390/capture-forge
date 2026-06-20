@@ -32,3 +32,9 @@ Tracking items deferred from code reviews that are not yet actionable but should
 - `payload_size` from decoded header not validated — Caller responsibility to validate at read time.
 - `session_id` stored but unused — Will be used in Story 2.1 for OPFS directory naming.
 - Orphaned `.partial` files on rename failure — No cleanup rollback in V0.1; acknowledged as acceptable.
+
+## Deferred from: code review of 1-5-webm-export-pipeline (2026-06-20)
+
+- `i as u32` truncation on 64-bit platforms [src/export.rs:48] — MAX_CHUNK_INDEX = 999,999 prevents u32 overflow in practice. Deferred, pre-existing architecture constraint.
+- `usize` overflow in `total_size` sum on 32-bit WASM [src/export.rs:131] — Real recordings <2GB in WASM memory. Allocation would fail gracefully first. Deferred, pre-existing architecture constraint.
+- Benchmark in unit tests rather than `#[bench]` [src/export.rs:tests] — `#[bench]` is unstable and criterion is not available. Acceptable as `#[test]` for V0.1.
