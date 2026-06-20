@@ -4,10 +4,12 @@ mod error;
 mod export;
 mod lifecycle;
 mod messaging;
+mod preview;
 mod recorder;
 mod status_bar;
 mod stream;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -25,8 +27,56 @@ static PANICKING: AtomicBool = AtomicBool::new(false);
 /// panic hook and message handlers.
 static SESSION: OnceLock<Mutex<recorder::RecordingSession>> = OnceLock::new();
 
+/// Stores exported preview data keyed by session ID.
+///
+/// The background writes exported WebM data here before opening the preview
+/// tab. The runtime message handler reads it when the preview page requests
+/// the data via `GET_PREVIEW_DATA`.
+static PREVIEW_DATA: OnceLock<Mutex<HashMap<String, PreviewDataEntry>>> = OnceLock::new();
+
+/// A single entry in the preview data store.
+#[allow(dead_code)]
+struct PreviewDataEntry {
+    /// The raw WebM bytes from the export pipeline.
+    webm_data: Vec<u8>,
+    /// Integrity state label ("Clean", "Partial", "Incomplete").
+    integrity: String,
+}
+
 fn init_session() -> &'static Mutex<recorder::RecordingSession> {
     SESSION.get_or_init(|| Mutex::new(recorder::RecordingSession::new()))
+}
+
+fn init_preview_store() -> &'static Mutex<HashMap<String, PreviewDataEntry>> {
+    PREVIEW_DATA.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Store exported preview data for a session so the preview page can retrieve it.
+///
+/// Called by the background orchestration after the export pipeline completes.
+#[wasm_bindgen]
+pub fn store_preview_data(session_id: &str, webm_data: &[u8], integrity: &str) {
+    if let Some(store) = PREVIEW_DATA.get() {
+        if let Ok(mut map) = store.lock() {
+            map.insert(
+                session_id.to_owned(),
+                PreviewDataEntry {
+                    webm_data: webm_data.to_vec(),
+                    integrity: integrity.to_owned(),
+                },
+            );
+        }
+    }
+}
+
+/// Remove stored preview data for a session (after Delete or tab close).
+#[wasm_bindgen]
+pub fn clear_preview_data(session_id: &str) {
+    if let Some(store) = PREVIEW_DATA.get() {
+        if let Ok(mut map) = store.lock() {
+            map.remove(session_id);
+        }
+    }
 }
 
 /// Thin `extern` shim so the panic hook can call `console.error()` without
@@ -99,6 +149,77 @@ async fn start() {
 
     // Initialise the global session so the panic hook can reference it.
     init_session();
+
+    // Initialise the preview data store.
+    init_preview_store();
+
+    // Register the runtime message handler for preview page communication.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+        use js_sys::{Array, Object, Reflect, Uint8Array};
+
+        if let Some(chrome) = Reflect::get(&js_sys::global(), &"chrome".into()).ok() {
+            if let Some(runtime) = Reflect::get(&chrome, &"runtime".into()).ok() {
+                let handler = Closure::wrap(Box::new(move |message: JsValue, _sender: JsValue, send_response: JsValue| {
+                    if let Ok(msg_obj) = message.dyn_into::<Object>() {
+                        if let Ok(msg_type) = Reflect::get(&msg_obj, &"type".into())
+                            .and_then(|v| v.as_string().ok_or(wasm_bindgen::JsValue::UNDEFINED))
+                        {
+                            match msg_type.as_str() {
+                                "GET_PREVIEW_DATA" => {
+                                    // Read the session ID from the message.
+                                    if let Ok(sid) = Reflect::get(&msg_obj, &"sessionId".into())
+                                        .and_then(|v| v.as_string().ok_or(wasm_bindgen::JsValue::UNDEFINED))
+                                    {
+                                        if let Some(store) = PREVIEW_DATA.get() {
+                                            if let Ok(map) = store.lock() {
+                                                if let Some(entry) = map.get(&sid) {
+                                                    // Build the response object.
+                                                    let response = Object::new();
+                                                    let arr = Uint8Array::from(&entry.webm_data[..]);
+                                                    Reflect::set(&response, &"webmData".into(), &arr.buffer()).ok();
+                                                    // Call sendResponse.
+                                                    if let Some(sr) = send_response.dyn_ref::<js_sys::Function>() {
+                                                        let _ = sr.call1(&JsValue::NULL, &response);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                "PREVIEW_CLOSED" | "DELETE_RECORDING" => {
+                                    // Transition session to Idle.
+                                    if let Some(mutex) = SESSION.get() {
+                                        if let Ok(mut session) = mutex.lock() {
+                                            let _ = session.transition(recorder::SessionState::Idle);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Return true to indicate we'll call sendResponse asynchronously.
+                    // For synchronous responses, Chrome handles this correctly.
+                    wasm_bindgen::JsValue::from(true)
+                }) as Box<dyn FnMut(JsValue, JsValue, JsValue) -> JsValue>);
+
+                if let Ok(on_message) = Reflect::get(&runtime, &"onMessage".into()) {
+                    let _ = Reflect::apply(
+                        &Reflect::get(&on_message, &"addListener".into())
+                            .expect("invariant: chrome.runtime.onMessage.addListener exists"),
+                        &on_message,
+                        &Array::of1(handler.as_ref().unchecked_ref()),
+                    );
+                }
+                // Leak the closure — it lives for the extension's lifetime.
+                handler.forget();
+            }
+        }
+    }
 }
 
 #[oxichrome::on(runtime::on_installed)]

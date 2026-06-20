@@ -54,6 +54,8 @@ pub enum ExtensionMessage {
     ApplyStreamingData {
         data: String,
     },
+    /// Preview page has been closed by the user (via Delete or Escape).
+    PreviewClosed,
 }
 
 impl ExtensionMessage {
@@ -153,6 +155,11 @@ mod tests {
         roundtrip(&ExtensionMessage::ApplyStreamingData {
             data: "some-stream-data".into(),
         });
+    }
+
+    #[test]
+    fn test_preview_closed() {
+        roundtrip(&ExtensionMessage::PreviewClosed);
     }
 
     #[test]

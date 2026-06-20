@@ -41,6 +41,10 @@ web-sys = { version = "0.3", features = [
     "HtmlSpanElement",
     "Node",
     "Performance",
+    # Story 1.7 — Preview page
+    "HtmlVideoElement",
+    "Url",
+    "HtmlButtonElement",
 ] }
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"

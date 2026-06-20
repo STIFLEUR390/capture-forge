@@ -50,7 +50,7 @@ development_status:
   1-4-chunk-writer-foundation: done
   1-5-webm-export-pipeline: done
   1-6-countdown-recorder-status-bar: done
-  1-7-preview-page-play-download-delete: ready-for-dev
+  1-7-preview-page-play-download-delete: review
   1-8-crash-recovery-detection-restore: backlog
   1-9-heartbeat-keepalive: backlog
   1-10-keyboard-shortcuts: backlog
