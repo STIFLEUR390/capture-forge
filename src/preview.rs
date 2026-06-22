@@ -554,7 +554,7 @@ impl PreviewPage {
         // --- Integrity badge ---
         let badge = document.create_element("div")?;
         badge.set_attribute("id", "integrity-badge")?;
-        badge.set_attribute("class", &format!("integrity-{}", self.integrity.css_class()))?;
+        badge.set_attribute("class", self.integrity.css_class())?;
         badge.set_attribute("role", "status")?;
         badge.set_attribute("aria-label", &format!("Integrity: {}", self.integrity.aria_label()))?;
         badge.set_text_content(Some(self.integrity.as_label()));
@@ -596,7 +596,6 @@ impl PreviewPage {
         let video = document.create_element("video")?;
         video.set_attribute("id", "preview-video")?;
         video.set_attribute("controls", "")?;
-        video.set_attribute("autoplay", "")?;
         video.set_attribute("aria-label", "Recording preview")?;
         video_container.append_child(&video)?;
 
@@ -650,7 +649,15 @@ impl PreviewPage {
         dialog.append_child(&dialog_actions)?;
         container.append_child(&dialog)?;
 
-        // Append the full container to body.
+        // Register event handlers.
+        self.register_keydown_handler(&document)?;
+        self.register_download_handler()?;
+        self.register_delete_handler()?;
+        self.register_dialog_handlers()?;
+        self.register_error_back_handler()?;
+
+        // Append the full container to body — only after all handlers are
+        // registered so partial DOM is never visible to the user on error.
         body.append_child(&container)?;
 
         // Store element references.
@@ -671,13 +678,6 @@ impl PreviewPage {
         if let Some(ref data) = self.webm_data {
             self.bind_video_source(data);
         }
-
-        // Register event handlers.
-        self.register_keydown_handler(&document)?;
-        self.register_download_handler()?;
-        self.register_delete_handler()?;
-        self.register_dialog_handlers()?;
-        self.register_error_back_handler()?;
 
         // Focus the video element after a microtask.
         self.focus_video(&document);
@@ -711,6 +711,12 @@ impl PreviewPage {
             Some(v) => v,
             None => return,
         };
+
+        // Skip binding if there's no actual data to play.
+        if webm_data.is_empty() {
+            oxichrome::log!("PreviewPage: no data available, video source not set");
+            return;
+        }
 
         // Create Blob from exported WebM data.
         let uint8 = js_sys::Uint8Array::from(webm_data);
@@ -1170,12 +1176,25 @@ pub fn start_preview(session_id: &str, webm_data: &[u8], integrity: &str) {
         _ => page.set_integrity(IntegrityState::Clean),
     };
 
-    // Set up the download handler: create a temporary anchor element with the
-    // blob URL and click it to trigger a browser download.
+    // Set up the download handler: use chrome.downloads.download() API
+    // per AC3, with proper save dialog support and native downloads manager integration.
     {
         let sid = session_id.to_owned();
         let data = webm_data.to_vec();
         page.set_on_download(move |_id, _data| {
+            // Skip download if there's no data.
+            if data.is_empty() {
+                web_sys::window()
+                    .and_then(|w| js_sys::Reflect::get(&w, &"console".into()).ok())
+                    .and_then(|c| {
+                        js_sys::Reflect::call(
+                            &js_sys::Reflect::get(&c, &"warn".into()).ok()?,
+                            &c,
+                            &js_sys::Array::of1(&"Capture Forge: download skipped — no data".into()),
+                        ).ok()
+                    });
+                return;
+            }
             // Create a Blob from the exported data.
             let uint8 = js_sys::Uint8Array::from(&data[..]);
             let arr = js_sys::Array::new();
@@ -1183,77 +1202,116 @@ pub fn start_preview(session_id: &str, webm_data: &[u8], integrity: &str) {
             if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence(&arr) {
                 if let Ok(url) = Url::create_object_url_with_blob(&blob) {
                     let filename = format!("CaptureForge-{}.webm", sid);
-                    let document = web_sys::window()
-                        .and_then(|w| w.document());
-                    if let Some(doc) = document {
-                        if let Ok(anchor) = doc.create_element("a") {
-                            anchor.set_attribute("href", &url).ok();
-                            anchor.set_attribute("download", &filename).ok();
-                            // Click the anchor via HTMLElement.click()
-                            if let Some(html_el) = anchor.dyn_ref::<web_sys::HtmlElement>() {
-                                html_el.click();
-                            }
-                            // Revoke the URL after a short delay so the
-                            // download can start.
-                            let url_clone = url.clone();
-                            let cb = Closure::once(move || {
-                                Url::revoke_object_url(&url_clone);
-                            });
-                            let _ = web_sys::window()
-                                .and_then(|w| w.set_timeout_with_callback_and_timeout_and_arguments_0(
-                                    cb.as_ref().unchecked_ref(), 1000,
-                                ).ok());
-                            cb.forget();
-                        }
+                    // Call chrome.downloads.download({url, filename}, callback)
+                    let try_download = || -> Option<()> {
+                        let chrome = js_sys::Reflect::get(&js_sys::global(), &"chrome".into()).ok()?;
+                        let downloads = js_sys::Reflect::get(&chrome, &"downloads".into()).ok()?;
+                        let download_fn = js_sys::Reflect::get(&downloads, &"download".into()).ok()?;
+                        let opts = js_sys::Object::new();
+                        js_sys::Reflect::set(&opts, &"url".into(), &url).ok()?;
+                        js_sys::Reflect::set(&opts, &"filename".into(), &filename).ok()?;
+                        // Revoke the blob URL after Chrome starts the download.
+                        let url_clone = url.clone();
+                        let revoke_cb = Closure::wrap(Box::new(move |_download_id: JsValue| {
+                            Url::revoke_object_url(&url_clone);
+                        }) as Box<dyn FnMut(JsValue)>);
+                        let _ = js_sys::Reflect::apply(
+                            &download_fn,
+                            &downloads,
+                            &js_sys::Array::of2(&opts, revoke_cb.as_ref().unchecked_ref()),
+                        ).ok()?;
+                        revoke_cb.forget();
+                        Some(())
+                    };
+                    if try_download().is_none() {
+                        // Fallback: revoke URL immediately if chrome.downloads is unavailable.
+                        Url::revoke_object_url(&url);
                     }
                 }
             }
         });
     }
 
+    // Helper to close the current tab using chrome.tabs API.
+    // window.close() is unreliable for extension pages; chrome.tabs is correct.
+    #[inline]
+    fn close_preview_tab() {
+        let _ = (|| -> Option<()> {
+            let chrome = js_sys::Reflect::get(&js_sys::global(), &"chrome".into()).ok()?;
+            let tabs = js_sys::Reflect::get(&chrome, &"tabs".into()).ok()?;
+            let get_current_fn = js_sys::Reflect::get(&tabs, &"getCurrent".into()).ok()?;
+            let remove_fn = js_sys::Reflect::get(&tabs, &"remove".into()).ok()?;
+
+            // Build a closure that receives the tab and removes it.
+            // Must be forget()'d so it survives the async callback.
+            let remove_cb = Closure::wrap(Box::new(move |tab: JsValue, _more: js_sys::Array| {
+                if let Some(tab_id) = js_sys::Reflect::get(&tab, &"id".into()).ok() {
+                    if !tab_id.is_undefined() {
+                        let _ = js_sys::Reflect::apply(
+                            &remove_fn,
+                            &tabs,
+                            &js_sys::Array::of1(&tab_id),
+                        );
+                    }
+                }
+            }) as Box<dyn FnMut(JsValue, js_sys::Array)>);
+
+            let _ = js_sys::Reflect::apply(
+                &get_current_fn,
+                &tabs,
+                &js_sys::Array::of1(remove_cb.as_ref().unchecked_ref()),
+            ).ok()?;
+
+            // Leak the closure — it must survive until chrome.tabs.getCurrent
+            // calls back.
+            remove_cb.forget();
+            Some(())
+        })();
+    }
+
     // Set up the close handler: notify the background and close the tab.
     {
+        let close_sid = session_id.to_owned();
         page.set_on_close(move || {
-            // Notify the background that the preview was closed.
-            if let Some(runtime) = js_sys::Reflect::get(&js_sys::global(), &"chrome".into())
-                .ok()
-                .and_then(|c| js_sys::Reflect::get(&c, &"runtime".into()).ok())
-            {
+            // Notify the background that the preview was closed, including the
+            // session ID so the background can clean up the preview data store.
+            let _ = (|| -> Option<()> {
+                let runtime = js_sys::Reflect::get(
+                    &js_sys::Reflect::get(&js_sys::global(), &"chrome".into()).ok()?,
+                    &"runtime".into(),
+                ).ok()?;
+                let send_msg = js_sys::Reflect::get(&runtime, &"sendMessage".into()).ok()?;
                 let msg = js_sys::Object::new();
-                js_sys::Reflect::set(&msg, &"type".into(), &"PREVIEW_CLOSED".into()).ok();
-                let _ = js_sys::Reflect::apply(
-                    &js_sys::Reflect::get(&runtime, &"sendMessage".into()).ok().expect("invariant: chrome.runtime.sendMessage exists"),
-                    &runtime,
-                    &js_sys::Array::of1(&msg),
-                );
-            }
-            // Close the current tab.
-            if let Some(w) = web_sys::window() {
-                let _ = w.close();
-            }
+                js_sys::Reflect::set(&msg, &"type".into(), &"PREVIEW_CLOSED".into()).ok()?;
+                js_sys::Reflect::set(&msg, &"sessionId".into(), &close_sid).ok()?;
+                let _ = js_sys::Reflect::apply(&send_msg, &runtime, &js_sys::Array::of1(&msg)).ok()?;
+                Some(())
+            })();
+            // Close the current tab via chrome.tabs API.
+            close_preview_tab();
         });
     }
 
     // Set up the delete confirmed handler: notify background and close tab.
     {
-        page.set_on_delete_confirmed(move |_session_id| {
-            // Notify the background that the recording should be deleted.
-            if let Some(runtime) = js_sys::Reflect::get(&js_sys::global(), &"chrome".into())
-                .ok()
-                .and_then(|c| js_sys::Reflect::get(&c, &"runtime".into()).ok())
-            {
+        let delete_sid = session_id.to_owned();
+        page.set_on_delete_confirmed(move |_sid| {
+            // Notify the background that the recording should be deleted,
+            // including the session ID so preview data is cleaned up.
+            let _ = (|| -> Option<()> {
+                let runtime = js_sys::Reflect::get(
+                    &js_sys::Reflect::get(&js_sys::global(), &"chrome".into()).ok()?,
+                    &"runtime".into(),
+                ).ok()?;
+                let send_msg = js_sys::Reflect::get(&runtime, &"sendMessage".into()).ok()?;
                 let msg = js_sys::Object::new();
-                js_sys::Reflect::set(&msg, &"type".into(), &"DELETE_RECORDING".into()).ok();
-                let _ = js_sys::Reflect::apply(
-                    &js_sys::Reflect::get(&runtime, &"sendMessage".into()).ok().expect("invariant: chrome.runtime.sendMessage exists"),
-                    &runtime,
-                    &js_sys::Array::of1(&msg),
-                );
-            }
-            // Close the tab.
-            if let Some(w) = web_sys::window() {
-                let _ = w.close();
-            }
+                js_sys::Reflect::set(&msg, &"type".into(), &"DELETE_RECORDING".into()).ok()?;
+                js_sys::Reflect::set(&msg, &"sessionId".into(), &delete_sid).ok()?;
+                let _ = js_sys::Reflect::apply(&send_msg, &runtime, &js_sys::Array::of1(&msg)).ok()?;
+                Some(())
+            })();
+            // Close the current tab via chrome.tabs API.
+            close_preview_tab();
         });
     }
 

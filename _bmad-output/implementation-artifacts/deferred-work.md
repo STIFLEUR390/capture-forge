@@ -43,3 +43,11 @@ Tracking items deferred from code reviews that are not yet actionable but should
 
 - 5 spec-required unit tests missing (pause label accessor, icon state, CSS class checks, WASM injection tests) — requires adding accessor methods to native struct. Low priority, spec coverage vs implementation depth trade-off.
 - Task 4 (background router wiring) explicitly deferred — integration dependent on future orchestrator work.
+
+## Deferred from: code review of 1-7-preview-page-play-download-delete (2026-06-20)
+
+- Incomplete integrity state lacks recovery explanation message [AC8] — "This recording could not be fully recovered." message depends on IntegrityReport infrastructure from Story 1.8 (crash recovery).
+- Partial integrity state lacks recovered-chunk detail [AC8] — "up to chunk N of M" requires chunk metadata from IntegrityReport (Story 1.8).
+- Preview page not registered in manifest.json — Manual HTML approach works for V0.1, oxichrome registration can be done later.
+- Space key test coverage gap [AC5] — No negative test for Space when video unfocused. Code behavior is correct but untested.
+- PreviewClosed variant in ExtensionMessage unused in runtime handler — Handler matches raw string "PREVIEW_CLOSED" instead of deserializing the variant. Works correctly. Consolidation in future refactor.

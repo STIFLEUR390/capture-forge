@@ -57,15 +57,22 @@ fn init_preview_store() -> &'static Mutex<HashMap<String, PreviewDataEntry>> {
 #[wasm_bindgen]
 pub fn store_preview_data(session_id: &str, webm_data: &[u8], integrity: &str) {
     if let Some(store) = PREVIEW_DATA.get() {
-        if let Ok(mut map) = store.lock() {
-            map.insert(
-                session_id.to_owned(),
-                PreviewDataEntry {
-                    webm_data: webm_data.to_vec(),
-                    integrity: integrity.to_owned(),
-                },
-            );
+        match store.lock() {
+            Ok(mut map) => {
+                map.insert(
+                    session_id.to_owned(),
+                    PreviewDataEntry {
+                        webm_data: webm_data.to_vec(),
+                        integrity: integrity.to_owned(),
+                    },
+                );
+            }
+            Err(_) => {
+                log!("store_preview_data: mutex poisoned for session {}", session_id);
+            }
         }
+    } else {
+        log!("store_preview_data: PREVIEW_DATA not initialised for session {}", session_id);
     }
 }
 
@@ -163,6 +170,10 @@ async fn start() {
         if let Some(chrome) = Reflect::get(&js_sys::global(), &"chrome".into()).ok() {
             if let Some(runtime) = Reflect::get(&chrome, &"runtime".into()).ok() {
                 let handler = Closure::wrap(Box::new(move |message: JsValue, _sender: JsValue, send_response: JsValue| {
+                    // Track whether we will call sendResponse asynchronously.
+                    // Only GET_PREVIEW_DATA may respond; one-way messages do not.
+                    let mut will_respond = false;
+
                     if let Ok(msg_obj) = message.dyn_into::<Object>() {
                         if let Ok(msg_type) = Reflect::get(&msg_obj, &"type".into())
                             .and_then(|v| v.as_string().ok_or(wasm_bindgen::JsValue::UNDEFINED))
@@ -180,20 +191,55 @@ async fn start() {
                                                     let response = Object::new();
                                                     let arr = Uint8Array::from(&entry.webm_data[..]);
                                                     Reflect::set(&response, &"webmData".into(), &arr.buffer()).ok();
-                                                    // Call sendResponse.
                                                     if let Some(sr) = send_response.dyn_ref::<js_sys::Function>() {
                                                         let _ = sr.call1(&JsValue::NULL, &response);
+                                                        will_respond = true;
                                                     }
                                                 }
                                             }
                                         }
                                     }
+
+                                    // If no response was sent (missing data), send an empty
+                                    // response so the caller's Promise settles.
+                                    if !will_respond {
+                                        if let Some(sr) = send_response.dyn_ref::<js_sys::Function>() {
+                                            let err = Object::new();
+                                            Reflect::set(&err, &"error".into(), &"not_found".into()).ok();
+                                            let _ = sr.call1(&JsValue::NULL, &err);
+                                            will_respond = true;
+                                        }
+                                    }
                                 }
-                                "PREVIEW_CLOSED" | "DELETE_RECORDING" => {
+                                "DELETE_RECORDING" => {
+                                    // Clean up the preview data store before transitioning.
+                                    if let Some(sid) = Reflect::get(&msg_obj, &"sessionId".into())
+                                        .and_then(|v| v.as_string().ok_or(wasm_bindgen::JsValue::UNDEFINED))
+                                        .ok()
+                                        .filter(|s: &String| !s.is_empty())
+                                    {
+                                        if let Some(store) = PREVIEW_DATA.get() {
+                                            if let Ok(mut map) = store.lock() {
+                                                map.remove(&sid);
+                                            }
+                                        }
+                                    }
                                     // Transition session to Idle.
                                     if let Some(mutex) = SESSION.get() {
                                         if let Ok(mut session) = mutex.lock() {
-                                            let _ = session.transition(recorder::SessionState::Idle);
+                                            if let Err(e) = session.transition(recorder::SessionState::Idle) {
+                                                log!("DELETE_RECORDING: transition to Idle failed: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                "PREVIEW_CLOSED" => {
+                                    // Transition session to Idle (no data cleanup needed).
+                                    if let Some(mutex) = SESSION.get() {
+                                        if let Ok(mut session) = mutex.lock() {
+                                            if let Err(e) = session.transition(recorder::SessionState::Idle) {
+                                                log!("PREVIEW_CLOSED: transition to Idle failed: {:?}", e);
+                                            }
                                         }
                                     }
                                 }
@@ -202,9 +248,13 @@ async fn start() {
                         }
                     }
 
-                    // Return true to indicate we'll call sendResponse asynchronously.
-                    // For synchronous responses, Chrome handles this correctly.
-                    wasm_bindgen::JsValue::from(true)
+                    // Return true only if we will call sendResponse asynchronously;
+                    // return undefined (JsValue::UNDEFINED) for one-way messages.
+                    if will_respond {
+                        wasm_bindgen::JsValue::from(true)
+                    } else {
+                        wasm_bindgen::JsValue::UNDEFINED
+                    }
                 }) as Box<dyn FnMut(JsValue, JsValue, JsValue) -> JsValue>);
 
                 if let Ok(on_message) = Reflect::get(&runtime, &"onMessage".into()) {

@@ -4,7 +4,7 @@ baseline_commit: 2609a85
 
 # Story 1.7: Preview Page — Play, Download, Delete
 
-Status: review
+Status: done
 
 ## Story
 
@@ -885,3 +885,33 @@ Created the complete preview page module (`src/preview.rs`) with:
 |------|--------|
 | 2026-06-20 | Created story file from epics Story 1.7 requirements, UX design specs (DESIGN.md, EXPERIENCE.md), architecture patterns, previous story intelligence from Story 1.6, and analysis of existing source code (recorder.rs, messaging.rs, export.rs, lib.rs) |
 | 2026-06-20 | Implemented preview page module (src/preview.rs) — PreviewPage struct, IntegrityState enum, inline CSS, DOM render, video source binding, Download/Delete actions, confirmation dialog, integrity badge, error state, keyboard handling, focus management, ARIA support. Added wasm-bindgen entry point start_preview(). Created dist/chromium/preview.html. Updated lib.rs with mod preview, PreviewDataStore, store_preview_data/clear_preview_data, and chrome.runtime.onMessage handler for preview IPC. Added PreviewClosed to messaging.rs. Added web-sys features to Cargo.toml. 27 unit tests passing. All 175 regression tests passing. |
+
+### Review Findings
+
+#### `decision-needed`
+
+- [x] [Review][Decision] **Download mechanism: anchor element vs `chrome.downloads.download()` API** — **Résolu : utiliser `chrome.downloads.download()`.** AC3 explicite, permission downloads déjà déclarée, meilleure intégration Chrome (saveAs, suivi natif). L'approche anchor est abandonnée au profit de l'API Chrome.
+- [x] [Review][Decision] **Video autoplay blocked by Chrome policy (no `muted` attribute)** — **Résolu : retirer `autoplay`.** L'AC2 traite l'autoplay comme optionnel. Une preview qui attend une action utilisateur explicite (clic Play ou Espace) évite les blocages navigateur et préserve une première impression audio naturelle plutôt qu'un démarrage en sourdine.
+
+#### `patch`
+
+- [x] [Review][Patch] **Integrity badge CSS class duplicated on initial render** [`src/preview.rs:557`]
+- [x] [Review][Patch] **GET_PREVIEW_DATA with missing session ID never responds** [`src/lib.rs`]
+- [x] [Review][Patch] **DELETE_RECORDING handler does not clear preview data** [`src/lib.rs`]
+- [x] [Review][Patch] **Session transition error silently discarded** [`src/lib.rs`]
+- [x] [Review][Patch] **`chrome.runtime.sendMessage` expect() panics if unavailable** [`src/preview.rs`]
+- [x] [Review][Patch] **PREVIEW_CLOSED message may not reach background before tab closes** [`src/preview.rs`]
+- [x] [Review][Patch] **Unknown integrity string silently maps to "Clean"** [`src/preview.rs`]
+- [x] [Review][Patch] **`store_preview_data` silently drops data on lock/mutex failure** [`src/lib.rs`]
+- [x] [Review][Patch] **Returning `true` (async) without calling `sendResponse` for one-way messages** [`src/lib.rs`]
+- [x] [Review][Patch] **`window.close()` silently fails for non-JS-opened tabs** [`src/preview.rs`]
+- [x] [Review][Patch] **Partial DOM injection on render failure** [`src/preview.rs`]
+- [x] [Review][Patch] **Empty/zero-length `webm_data` renders invalid video** [`src/preview.rs`]
+
+#### `defer`
+
+- [x] [Review][Defer] **Incomplete integrity state lacks recovery explanation message** [`AC8`] — AC8 states: "If Incomplete, a message explains: 'This recording could not be fully recovered.'" The current implementation (line 83) only shows the "Incomplete" label. The full message depends on IntegrityReport infrastructure from Story 1.8. Deferred: requires crash recovery data source.
+- [x] [Review][Defer] **Partial integrity state lacks recovered-chunk detail** [`AC8`] — AC8 requires "Clean — up to chunk N of M" for Partial state. Requires chunk metadata from IntegrityReport infrastructure (Story 1.8). Deferred: requires crash recovery data source.
+- [x] [Review][Defer] **Preview page not registered in manifest.json** — No manifest entry for preview page. The manual HTML page (`dist/chromium/preview.html`) works via direct URL, but oxichrome-integrated registration would be cleaner. Deferred: manual HTML approach works for V0.1.
+- [x] [Review][Defer] **Space key test coverage gap** [`AC5`] — No test verifying Space does NOT toggle playback when the video element is unfocused. The code correctly relies on browser-native `<video controls>`, but AC5's explicit negative case is untested. Deferred: test gap, not a code defect.
+- [x] [Review][Defer] **PreviewClosed variant in ExtensionMessage unused in runtime handler** — Defined and tested in messaging.rs, but `lib.rs` onMessage handler matches the raw string `"PREVIEW_CLOSED"` directly instead of deserializing the variant. Deferred: works correctly, consolidation can happen in a future refactor.
