@@ -51,3 +51,8 @@ Tracking items deferred from code reviews that are not yet actionable but should
 - Preview page not registered in manifest.json — Manual HTML approach works for V0.1, oxichrome registration can be done later.
 - Space key test coverage gap [AC5] — No negative test for Space when video unfocused. Code behavior is correct but untested.
 - PreviewClosed variant in ExtensionMessage unused in runtime handler — Handler matches raw string "PREVIEW_CLOSED" instead of deserializing the variant. Works correctly. Consolidation in future refactor.
+
+## Deferred from: code review of 1-8-crash-recovery-detection-restore (2026-06-23)
+
+- OPFS orphan scan is V0.1 scaffold (returns empty) — full enumeration deferred to Story 2.1 per spec.
+- No sorting mechanism for orphan sessions by recency — needs real OPFS scan (Story 2.1) before sorting can be implemented.

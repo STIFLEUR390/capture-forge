@@ -1,5 +1,7 @@
 # generated: 2026-06-19
-# last_updated: 2026-06-20
+# last_updated: 2026-06-28
+
+# review-status: story 1.8 passed code review and all patches applied
 # project: capture-forge
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +37,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-19
-last_updated: 2026-06-20
+last_updated: 2026-06-28
 project: capture-forge
 project_key: NOKEY
 tracking_system: file-system
@@ -51,8 +53,8 @@ development_status:
   1-5-webm-export-pipeline: done
   1-6-countdown-recorder-status-bar: done
   1-7-preview-page-play-download-delete: done
-  1-8-crash-recovery-detection-restore: backlog
-  1-9-heartbeat-keepalive: backlog
+  1-8-crash-recovery-detection-restore: done
+  1-9-heartbeat-keepalive: ready-for-dev
   1-10-keyboard-shortcuts: backlog
   epic-1-retrospective: optional
 

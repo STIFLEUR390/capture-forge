@@ -1,5 +1,6 @@
 use crate::error::{RecordingError, Result};
 use crate::messaging::RecordingMode;
+use crate::recovery::IntegrityReport;
 use serde::{Deserialize, Serialize};
 
 /// All valid states of a V0.1 recording session.
@@ -61,6 +62,8 @@ pub struct RecordingSession {
     /// Total accumulated recording duration in milliseconds (excluding
     /// pauses).  Set by the lifecycle module when recording stops.
     pub(crate) accumulated_duration_ms: f64,
+    /// Integrity report from crash recovery (set during restore flow).
+    integrity_report: Option<IntegrityReport>,
 }
 
 impl RecordingSession {
@@ -72,6 +75,7 @@ impl RecordingSession {
             mic_enabled: true,
             session_id: None,
             accumulated_duration_ms: 0.0,
+            integrity_report: None,
         }
     }
 
@@ -161,6 +165,16 @@ impl RecordingSession {
     /// Return the accumulated recording duration (milliseconds).
     pub fn accumulated_duration_ms(&self) -> f64 {
         self.accumulated_duration_ms
+    }
+
+    /// Return the integrity report, if one has been set.
+    pub(crate) fn integrity_report(&self) -> Option<&IntegrityReport> {
+        self.integrity_report.as_ref()
+    }
+
+    /// Set the integrity report (called after crash recovery).
+    pub(crate) fn set_integrity_report(&mut self, report: IntegrityReport) {
+        self.integrity_report = Some(report);
     }
 
     /// Attempt a state transition.
@@ -690,5 +704,34 @@ mod tests {
         let mut s = RecordingSession::new();
         s.set_duration(1234.5);
         assert!((s.accumulated_duration_ms() - 1234.5).abs() < 0.001);
+    }
+
+    // ------------------------------------------------------------------
+    // RecordingSession — integrity_report field (Story 1.8)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_session_integrity_report_default_none() {
+        let s = RecordingSession::new();
+        assert!(s.integrity_report().is_none());
+    }
+
+    #[test]
+    fn test_session_integrity_report_set_and_get() {
+        let mut s = RecordingSession::new();
+        let report = crate::recovery::IntegrityReport {
+            status: crate::recovery::IntegrityStatus::Clean,
+            total_chunks: 5,
+            verified_chunks: 5,
+            lost_chunks: 0,
+            contiguous_prefix: 5,
+            recommended_action: "restore".into(),
+            session_id: "rec_test_001".into(),
+            detail_message: None,
+        };
+        s.set_integrity_report(report);
+        assert!(s.integrity_report().is_some());
+        assert_eq!(s.integrity_report().unwrap().status, crate::recovery::IntegrityStatus::Clean);
+        assert_eq!(s.integrity_report().unwrap().verified_chunks, 5);
     }
 }

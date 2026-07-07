@@ -56,6 +56,17 @@ pub enum ExtensionMessage {
     },
     /// Preview page has been closed by the user (via Delete or Escape).
     PreviewClosed,
+    /// Crash recovery event: orphaned chunks detected.
+    RecoveryFound {
+        session_id: String,
+        chunk_count: u32,
+    },
+    /// User clicked the Restore button on the recovery toast.
+    RestoreRecording {
+        session_id: String,
+    },
+    /// User dismissed the recovery toast (clicked Dismiss or timeout fired).
+    DismissRecovery,
 }
 
 impl ExtensionMessage {
@@ -160,6 +171,40 @@ mod tests {
     #[test]
     fn test_preview_closed() {
         roundtrip(&ExtensionMessage::PreviewClosed);
+    }
+
+    #[test]
+    fn test_recovery_found() {
+        roundtrip(&ExtensionMessage::RecoveryFound {
+            session_id: "rec_abc_123".into(),
+            chunk_count: 42,
+        });
+    }
+
+    #[test]
+    fn test_restore_recording() {
+        roundtrip(&ExtensionMessage::RestoreRecording {
+            session_id: "rec_abc_123".into(),
+        });
+    }
+
+    #[test]
+    fn test_dismiss_recovery() {
+        roundtrip(&ExtensionMessage::DismissRecovery);
+    }
+
+    #[test]
+    fn test_is_keepalive_new_variants_false() {
+        assert!(!ExtensionMessage::RecoveryFound {
+            session_id: "s".into(),
+            chunk_count: 1,
+        }
+        .is_keepalive());
+        assert!(!ExtensionMessage::RestoreRecording {
+            session_id: "s".into(),
+        }
+        .is_keepalive());
+        assert!(!ExtensionMessage::DismissRecovery.is_keepalive());
     }
 
     #[test]

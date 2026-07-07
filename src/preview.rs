@@ -132,6 +132,15 @@ body {
 #integrity-badge.integrity-clean { background: var(--integrity-clean); }
 #integrity-badge.integrity-partial { background: var(--integrity-partial); color: #1A1A00; }
 #integrity-badge.integrity-incomplete { background: var(--integrity-incomplete); }
+/* Integrity detail message */
+#integrity-detail {
+  font-size: 12px;
+  color: #71717A;
+  margin-top: 4px;
+  margin-bottom: 8px;
+  text-align: center;
+}
+#integrity-detail[hidden] { display: none; }
 /* Delete dialog overlay */
 #delete-dialog {
   position: fixed;
@@ -207,6 +216,8 @@ pub(crate) struct PreviewPage {
     webm_data: Option<Vec<u8>>,
     /// Integrity state for the badge.
     integrity: IntegrityState,
+    /// Optional detail message for the integrity badge.
+    detail_message: Option<String>,
     /// Whether the delete confirmation dialog is visible.
     dialog_visible: bool,
     /// Error message to display (None = no error, show player).
@@ -233,6 +244,8 @@ pub(crate) struct PreviewPage {
     delete_btn_el: Option<HtmlButtonElement>,
     #[cfg(target_arch = "wasm32")]
     badge_el: Option<Element>,
+    #[cfg(target_arch = "wasm32")]
+    detail_message_el: Option<Element>,
     #[cfg(target_arch = "wasm32")]
     dialog_el: Option<Element>,
     #[cfg(target_arch = "wasm32")]
@@ -274,6 +287,7 @@ impl PreviewPage {
             session_id: None,
             webm_data: None,
             integrity: IntegrityState::Clean,
+            detail_message: None,
             dialog_visible: false,
             error_message: None,
             error_suggestion: None,
@@ -291,6 +305,8 @@ impl PreviewPage {
             delete_btn_el: None,
             #[cfg(target_arch = "wasm32")]
             badge_el: None,
+            #[cfg(target_arch = "wasm32")]
+            detail_message_el: None,
             #[cfg(target_arch = "wasm32")]
             dialog_el: None,
             #[cfg(target_arch = "wasm32")]
@@ -345,6 +361,19 @@ impl PreviewPage {
         self.integrity = state;
         #[cfg(target_arch = "wasm32")]
         self.update_integrity_badge();
+        self
+    }
+
+    /// Return the detail message, if any.
+    pub(crate) fn detail_message(&self) -> Option<&str> {
+        self.detail_message.as_deref()
+    }
+
+    /// Set the detail message for the integrity badge.
+    pub(crate) fn set_detail_message(&mut self, msg: Option<String>) -> &mut Self {
+        self.detail_message = msg;
+        #[cfg(target_arch = "wasm32")]
+        self.update_detail_message();
         self
     }
 
@@ -560,6 +589,18 @@ impl PreviewPage {
         badge.set_text_content(Some(self.integrity.as_label()));
         container.append_child(&badge)?;
 
+        // --- Integrity detail message (hidden by default) ---
+        let detail_el = document.create_element("div")?;
+        detail_el.set_attribute("id", "integrity-detail")?;
+        detail_el.set_attribute("class", "integrity-detail")?;
+        detail_el.set_attribute("aria-live", "polite")?;
+        if let Some(ref msg) = self.detail_message {
+            detail_el.set_text_content(Some(msg));
+        } else {
+            detail_el.set_attribute("hidden", "")?;
+        }
+        container.append_child(&detail_el)?;
+
         // --- Error container (hidden by default) ---
         let error_container = document.create_element("div")?;
         error_container.set_attribute("id", "error-container")?;
@@ -663,6 +704,7 @@ impl PreviewPage {
         // Store element references.
         self.container = Some(container);
         self.badge_el = Some(badge);
+        self.detail_message_el = Some(detail_el);
         self.error_container_el = Some(error_container);
         self.error_message_el = Some(error_message_el);
         self.error_suggestion_el = Some(error_suggestion_el);
@@ -982,6 +1024,23 @@ impl PreviewPage {
         }
     }
 
+    /// Update the detail message DOM element.
+    #[cfg(target_arch = "wasm32")]
+    fn update_detail_message(&self) {
+        if let Some(ref el) = self.detail_message_el {
+            match self.detail_message.as_ref() {
+                Some(msg) => {
+                    el.remove_attribute("hidden").ok();
+                    el.set_text_content(Some(msg));
+                }
+                None => {
+                    el.set_attribute("hidden", "").ok();
+                    el.set_text_content(None);
+                }
+            }
+        }
+    }
+
     /// Update the dialog visibility in the DOM.
     #[cfg(target_arch = "wasm32")]
     fn update_dialog_visibility(&self) {
@@ -1086,6 +1145,7 @@ impl PreviewPage {
         self.download_btn_el = None;
         self.delete_btn_el = None;
         self.badge_el = None;
+        self.detail_message_el = None;
         self.dialog_el = None;
         self.dialog_cancel_el = None;
         self.dialog_confirm_el = None;
@@ -1163,9 +1223,10 @@ fn chrono_now() -> String {
 /// * `session_id` — Unique session identifier for filename generation.
 /// * `webm_data` — The raw WebM bytes from the export pipeline.
 /// * `integrity` — Integrity state label: "Clean", "Partial", or "Incomplete".
+/// * `detail` — Optional detail message for the integrity badge (e.g., "Clean — up to chunk N of M").
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn start_preview(session_id: &str, webm_data: &[u8], integrity: &str) {
+pub fn start_preview(session_id: &str, webm_data: &[u8], integrity: &str, detail: Option<String>) {
     let mut page = PreviewPage::new();
     page.set_session_id(session_id.to_owned());
     page.set_webm_data(webm_data.to_vec());
@@ -1175,6 +1236,12 @@ pub fn start_preview(session_id: &str, webm_data: &[u8], integrity: &str) {
         "Incomplete" => page.set_integrity(IntegrityState::Incomplete),
         _ => page.set_integrity(IntegrityState::Clean),
     };
+
+    if let Some(msg) = detail {
+        if !msg.is_empty() {
+            page.set_detail_message(Some(msg));
+        }
+    }
 
     // Set up the download handler: use chrome.downloads.download() API
     // per AC3, with proper save dialog support and native downloads manager integration.
@@ -1627,6 +1694,59 @@ mod tests {
         let mut page = PreviewPage::new();
         page.set_webm_data(vec![0x1A, 0x45, 0xDF, 0xA3]);
         assert!(page.webm_data.is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // Integrity detail message (Story 1.7 deferred / Story 1.8)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_preview_detail_message_default_none() {
+        let page = PreviewPage::new();
+        assert!(page.detail_message().is_none());
+    }
+
+    #[test]
+    fn test_preview_detail_message_partial() {
+        let mut page = PreviewPage::new();
+        page.set_integrity(IntegrityState::Partial);
+        page.set_detail_message(Some("Clean — up to chunk 7 of 10".into()));
+        assert_eq!(
+            page.detail_message(),
+            Some("Clean — up to chunk 7 of 10"),
+        );
+    }
+
+    #[test]
+    fn test_preview_detail_message_incomplete() {
+        let mut page = PreviewPage::new();
+        page.set_integrity(IntegrityState::Incomplete);
+        page.set_detail_message(Some("This recording could not be fully recovered.".into()));
+        assert_eq!(
+            page.detail_message(),
+            Some("This recording could not be fully recovered."),
+        );
+    }
+
+    #[test]
+    fn test_preview_detail_message_clear() {
+        let mut page = PreviewPage::new();
+        page.set_detail_message(Some("Some message".into()));
+        assert!(page.detail_message().is_some());
+        page.set_detail_message(None);
+        assert!(page.detail_message().is_none());
+    }
+
+    #[test]
+    fn test_preview_playback_available_with_partial_integrity() {
+        let mut page = PreviewPage::new();
+        page.set_webm_data(vec![0x1A, 0x45, 0xDF, 0xA3]);
+        page.set_integrity(IntegrityState::Partial);
+        page.set_detail_message(Some("Clean — up to chunk 5 of 10".into()));
+
+        // Playback should still work regardless of integrity state.
+        assert!(page.webm_data.is_some());
+        assert_eq!(page.integrity_state(), &IntegrityState::Partial);
     }
 
     // ------------------------------------------------------------------

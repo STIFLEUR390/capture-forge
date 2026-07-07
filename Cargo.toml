@@ -45,6 +45,13 @@ web-sys = { version = "0.3", features = [
     "HtmlVideoElement",
     "Url",
     "HtmlButtonElement",
+    # Story 1.8 — Crash recovery (OPFS enumeration)
+    "StorageManager",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemEntry",
+    "FileSystemFlags",
 ] }
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
